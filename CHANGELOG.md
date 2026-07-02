@@ -5,9 +5,10 @@
 A codebase-wide review (`docs/CODE_REVIEW_2026-06-24.md`) and its top-priority fixes, the
 upstream-sync opt-in ports (PR #105), the gamut-compression activation + Kotlin hardening
 backlog (PR #109), and the "exact + fast" pass (2026-07-02): per-effect spatial decoupling,
-the print-route spatial/grain enable, and engine memoization. The host parity suite grew
-26 → **33 gates**, all green; every default engine path stays byte-identical to the oracle
-except the corrections/enables explicitly listed below.
+the print-route spatial/grain enable, engine memoization, and the Oklch perceptual
+output-gamut option (PR #111). The host parity suite grew 26 → **34 gates**, all green; every
+default engine path stays byte-identical to the oracle except the corrections/enables
+explicitly listed below.
 
 ### App waves (PRs #90–#103, merged before this cycle)
 - **Masking v1** — radial/linear masks plus luminance and color-range masks, 13 local ops
@@ -37,6 +38,14 @@ except the corrections/enables explicitly listed below.
   radial-to-locus xy compression baked into the filming tc_lut. Both wired
   engine → JNI → facade → two dropdowns under Simulation → Output, round-tripping in recipes
   (old recipes → OFF, unchanged look). Gates `test_gamut_out_aces` / `test_gamut_in_xy`.
+- **Oklch perceptual output-gamut compression (opt-in, default-OFF).** A third output-gamut
+  option (`OutputGamutCompress.OKLCH`, C++ `kOklch=3`): perceptual-hue-preserving chroma
+  compression at constant Oklch(L, h) — a Reinhard knee on `C / C_max` with `C_max` regenerated
+  in-engine by a 64×720 bisection, float64 matrices captured from colour-science. Selectable as
+  "Oklch (perceptual, keep hue)" in the Output-gamut-compression dropdown; recipes round-trip by
+  ordinal. Default-OFF is strict byte-identical; the active path is bit-exact to the oracle
+  (`27bd085`). New gate `test_gamut_out_oklch`. First slice of the perceptual output-gamut work
+  (P2 #6); `oklrab`/`jzazbz`/`cam16ucs` remain reserved enum slots (unported).
 - **Highlight boost trio** (`boost_ev`/`boost_range`/`protect_ev`) ported into `expose`
   (pre-clip highlight reconstruction; gate `test_highlight_boost_e2e`).
 - **Print density-curve morph (s023), opt-in / default-OFF.** First feature from the upstream-sync
@@ -123,8 +132,8 @@ except the corrections/enables explicitly listed below.
   (`PIPESTATUS[0]`) or empty output, not only on a "FAIL" string — so a missing-asset/setup
   failure or a crash before any print can no longer silently report green. The grep stays
   case-insensitive.
-- **Gate count 26 → 33**: + `small_preview_aa`, `print_curves_morph`, `np_interp`,
-  `gamut_out_aces`, `gamut_in_xy`, `spatial_decouple_e2e`, `print_spatial_e2e`.
+- **Gate count 26 → 34**: + `small_preview_aa`, `print_curves_morph`, `np_interp`,
+  `gamut_out_aces`, `gamut_out_oklch`, `gamut_in_xy`, `spatial_decouple_e2e`, `print_spatial_e2e`.
   `test_parallel` runs each thread-count on a fresh engine (the memo would otherwise make
   the 1-vs-8 filming comparison vacuous) and adds the print+grain+halation case.
 

@@ -33,7 +33,7 @@ guess. The ranked catalog below is distilled from ~1,150 forum posts; re-mine be
 
 The engine C++ under `engine/spektra-core/src/main/cpp/**` is **bit-exact parity-gated** against the
 spektrafilm oracle (pinned SHA `c1d0e44`) — within tol (`max_abs ≤ 1e-4`, `rms ≤ 1e-5`) **and**
-byte-identical across thread counts. Any engine edit must keep the 33-test host parity suite green
+byte-identical across thread counts. Any engine edit must keep the 34-test host parity suite green
 (authoritative argv in `.github/workflows/ci.yml`; annotated list in CLAUDE.md — the count grows,
 always recount from ci.yml) and, for a new feature, ship an oracle golden plus a strict
 default-no-op plus a thread-invariance check.

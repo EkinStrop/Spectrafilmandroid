@@ -73,15 +73,16 @@ test_tonecurve      "$ASSET/profiles/kodak_portra_400.json" "$G/scan_portra"
 test_half
 ```
 
-(Excerpt only — the suite has since grown to **33 gates** (downscale, small_preview_aa,
+(Excerpt only — the suite has since grown to **34 gates** (downscale, small_preview_aa,
 spectral_blur/hanatos_surface/camera_uvir/preflash/print_evcomp/scanner_bwcorr/
 provia_couplers/highlight_boost e2e wiring gates, print_curves_morph, np_interp,
-gamut_out_aces, gamut_in_xy, bake_lut, params_passthrough, spatial_decouple_e2e,
-print_spatial_e2e). `.github/workflows/ci.yml` is the authoritative list + argv.)
+gamut_out_aces, gamut_out_oklch, gamut_in_xy, bake_lut, params_passthrough,
+spatial_decouple_e2e, print_spatial_e2e). `.github/workflows/ci.yml` is the authoritative
+list + argv.)
 
 ### Fast full-suite replay
 
-Do NOT recompile the full engine source set per test — 33 gates × full rebuild is prohibitively
+Do NOT recompile the full engine source set per test — 34 gates × full rebuild is prohibitively
 slow. Compile the engine sources **once** into a static archive, then link each test against it
 (same flags: `-std=c++17 -O2 -pthread -I. -I tools/parity -DSPK_TEST_DIR=...`):
 
@@ -94,7 +95,7 @@ g++ -std=c++17 -O2 -pthread -I. -I../../../../../tools/parity \
   -DSPK_TEST_DIR="\"$CPP/tests\"" tests/<test>.cpp /tmp/libspk.a -o /tmp/<test>
 ```
 
-1 build + 33 links instead of 33 full builds. Loop over the argv table copied from
+1 build + 34 links instead of 34 full builds. Loop over the argv table copied from
 `.github/workflows/ci.yml` and grep each run's output for `FAIL`.
 
 `SPK_NUM_THREADS` overrides `std::hardware_concurrency()`. The parity tests pin `1` vs `8` to
@@ -117,7 +118,7 @@ prove byte-identical output.
 ## 3. CI jobs (`.github/workflows/ci.yml`)
 
 - **`engine-native`** — host C++ build of `libspektra`.
-- **`engine-parity`** — the 33-test stage gate (run on push/PR; see ci.yml for the list).
+- **`engine-parity`** — the 34-test stage gate (run on push/PR; see ci.yml for the list).
 - **`parity`** — `.spkvec` comparator self-test (`tools/parity/` CMake + ctest).
 - **`python-lint`**.
 - **`android`** — `:app:testDebugUnitTest` + full assemble for all ABIs.

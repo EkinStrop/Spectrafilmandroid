@@ -152,8 +152,13 @@ not a commitment to do all of it.
   `kOff`, gated by `test_gamut_in_xy`. Both flags flow spk_params → JNI → `SpektraParams.IoParams`
   → two dropdowns under Simulation→Output; `input_gamut_compress` is folded into the tc_lut cache
   key + the film-density memo key. The Reinhard knee stays at the oracle default (0,1,6) — not
-  user-exposed in v1. Perceptual output algos (cam16ucs/oklch/oklrab/jzazbz) remain OPEN (P2 #6,
-  reserved enum slots).
+  user-exposed in v1. **Oklch perceptual output GC added (PR #111, P2 #6 slice 1):** `kOklch=3` /
+  facade `OKLCH` — perceptual-hue-preserving chroma compression at constant Oklch(L, h): a
+  Reinhard knee on `C / C_max` with `C_max` regenerated in-engine by a 64×720 bisection, float64
+  matrices from colour-science; opt-in / default-OFF byte-identical, bit-exact to oracle
+  `27bd085`, gated by `test_gamut_out_oklch`, UI option "Oklch (perceptual, keep hue)". The
+  remaining perceptual algos (oklrab `kOklrab=4` / jzazbz `kJzazbz=5` / cam16ucs `kCam16ucs=6`,
+  the last the full CIECAM16) stay OPEN (P2 #6 slices 2-4, reserved enum slots — unported).
 - ✅ **Scanner black/white corrections** (`scanner_white_correction` / `_black_correction` /
   `_white_level` / `_black_level`) **WIRED (this PR).** Port of
   `runtime/services/color_reference.py` (`ColorReferenceService`) +
@@ -251,8 +256,9 @@ not a commitment to do all of it.
 ## B. Stale / inaccurate docs (status drift)
 
 - ✅ **`HANDOFF.md` current + consolidated (2026-07-02)** — carries the START-HERE resume block
-  (next task P2 #6), the latest pass state, evergreen operating notes, and a compressed session
-  history (full text of the old session logs lives in the file's git history).
+  (next task P2 #6 slice 2 = `oklrab`, after the merged `oklch` slice 1), the latest pass state,
+  evergreen operating notes, and a compressed session history (full text of the old session logs
+  lives in the file's git history).
 - ✅ **`docs/PRESETS.md` preset count re-fixed** (2026-07-02) — the 2026-06-01 fix set the count
   to 21, but `presets.json` now ships **28** (verified on disk). `docs/PRESETS.md`,
   `docs/ASSETS.md`, and `README.md` now all say 28; presets added after `docs/PRESETS.md` was

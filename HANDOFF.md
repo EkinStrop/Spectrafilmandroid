@@ -125,6 +125,9 @@ different (likely 2-core) container — never mix boxes when quoting deltas.
 - The user is Akshay Sharma, the app's author (pixls.us megathread), testing on a Galaxy S26 Ultra (SM-S948W, Android 16, arm64) — device-gated items (R8 smoke, GPU-LUT feel, E2 print-look sign-off, mask/gesture feel) queue until he tests on it.
 - Engine param honesty: presets/UI must set only engine-honored fields — halation via halationAmount/scatterAmount/boostEv (halationStrength/halationFirstSigmaUm are baked per-profile from use/antihalation and ignored); params threaded only inside conditional blocks (e.g. if(spatial)) get silently dropped on the default path — thread unconditionally and fold into the relevant cache keys.
 - CI flake signature: the android job intermittently fails during setup-android with 'Error on ZipFile unknown archive' (corrupt SDK download) — not a code failure; re-run failed jobs.
+- `docs/PRIORITY_ROADMAP_2026-06-24.md` defines the P0–P3 item numbering (#1–#27) used throughout this file (P2 #6 = perceptual gamut algos, #18 = MALLETT2019 decision, #20-27 = the Strategy-B rebaseline cluster).
+- When parallel sessions/agents touch the engine, land engine fixes ONE AT A TIME — they collide on shared engine files and the PR.
+- User's laptop env (device testing over adb): working copy `C:\Filmcam123\Spectrafilmandroid` (`C:\Spectrafilm` is docs-only — a trap); oracle = Python 3.13 venv `C:\Filmcam123\spkenv` + `C:\Filmcam123\spkstubs\sitecustomize.py`; arm64 test binaries at `C:\Filmcam123\spk_arm64`; JAVA_HOME = Android Studio jbr JDK 21.
 
 ---
 
@@ -275,4 +278,4 @@ different (likely 2-core) container — never mix boxes when quoting deltas.
 - The fd-failure file fallback in the RAW decode path still uses allocateDirect (managed heap) — a possible off-heap follow-up never done
 - docs/DEVICE_TEST_REPORT.md is the historic v0.4.0 device pass; later re-validations are recorded in docs/AUDIT.md
 
-### Doc map (what to read for what) — CLAUDE.md build/parity/arch · docs/AUDIT.md open items · docs/IMPROVEMENT_BACKLOG.md LR-RE'd feature list · docs/PERF_ROADMAP.md perf plan+policy · docs/RESEARCH_* RE studies · docs/PRESETS.md/FILM_STOCKS.md content · docs/maps/ source-project maps.
+### Doc map (what to read for what) — CLAUDE.md build/parity/arch · docs/AUDIT.md open items · docs/PRIORITY_ROADMAP_2026-06-24.md the #1–#27 priority numbering · docs/IMPROVEMENT_BACKLOG.md LR-RE'd feature list · docs/PERF_ROADMAP.md perf plan+policy · docs/RESEARCH_* RE studies · docs/PRESETS.md/FILM_STOCKS.md content · docs/maps/ source-project maps.

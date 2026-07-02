@@ -34,9 +34,18 @@ object Presets {
         dir(ctx).listFiles { f -> f.extension == "json" }
             ?.map { it.nameWithoutExtension }?.sorted() ?: emptyList()
 
-    fun save(ctx: Context, name: String, state: ParamsState) {
+    fun save(ctx: Context, name: String, state: ParamsState) =
+        saveJson(ctx, name, toJsonString(state))
+
+    /**
+     * Persist a PRE-SERIALIZED preset [json] (from [toJsonString]) under [name].
+     * [toJsonString] reads live Compose [ParamsState] field-by-field, so it must run on the
+     * main thread; passing the string here lets the caller serialize on main and cross only
+     * the file write to IO — avoiding a torn (partially-updated) off-thread snapshot.
+     */
+    fun saveJson(ctx: Context, name: String, json: String) {
         val safe = name.trim().ifEmpty { "preset" }.replace(Regex("[^A-Za-z0-9_\\- ]"), "_")
-        File(dir(ctx), "$safe.json").writeText(toJson(state).toString(2))
+        File(dir(ctx), "$safe.json").writeText(json)
     }
 
     fun load(ctx: Context, name: String, into: ParamsState) {

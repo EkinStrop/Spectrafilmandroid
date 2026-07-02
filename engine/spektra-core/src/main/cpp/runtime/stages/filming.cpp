@@ -454,13 +454,11 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // float64 irradiance AFTER the highlight boost and BEFORE lens blur /
     // halation — matching filming.py::expose, which calls
     // apply_diffusion_filter_um(raw, camera.diffusion_filter, pixel_size_um)
-    // before apply_gaussian_blur_um / apply_halation_um. Gated on
-    // spatial_effects: the oracle's digest_params zeroes
-    // camera.diffusion_filter.active when deactivate_spatial_effects is True
-    // (params_builder.py), so the diffusion filter is part of the spatial branch.
-    // No-op unless diffusion_filter.active (schema default false), so default
-    // params stay bit-exact.
-    if (params.spatial_effects && params.diffusion_filter.active) {
+    // before apply_gaussian_blur_um / apply_halation_um. Self-gated on
+    // diffusion_filter.active — the oracle's ONLY gate (deactivate_spatial_effects
+    // is expressed by the digest zeroing .active, params_builder.py). No-op unless
+    // active (schema default false), so default params stay bit-exact.
+    if (params.diffusion_filter.active) {
         apply_diffusion_filter_um(raw.data(), width, height,
                                   params.diffusion_filter, params.pixel_size_um);
     }
@@ -471,10 +469,10 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // between apply_diffusion_filter_um and apply_halation_um. apply_gaussian_blur_um
     // gates on sigma = lens_blur_um / pixel_size_um > 0 and blurs every channel with
     // the same scalar sigma (fast_gaussian_filter broadcasts the scalar across the
-    // 3 channels). Gated on spatial_effects: the oracle's digest_params zeroes
-    // camera.lens_blur_um under deactivate_spatial_effects=True, so the lens blur is
-    // part of the spatial branch. Default lens_blur_um == 0 => no-op (bit-exact).
-    if (params.spatial_effects && params.lens_blur_um > 0.0 &&
+    // 3 channels). Self-gated on lens_blur_um > 0 — the oracle's only gate
+    // (deactivate_spatial_effects is expressed by the digest zeroing lens_blur_um).
+    // Default lens_blur_um == 0 => no-op (bit-exact).
+    if (params.lens_blur_um > 0.0 &&
         params.pixel_size_um > 0.0) {
         double sigma = params.lens_blur_um / params.pixel_size_um;
         if (sigma > 0.0) {
@@ -483,10 +481,12 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
         }
     }
 
-    // Spatial branch: in-emulsion scatter + back-reflection halation, applied to
-    // the float64 irradiance before the log10 (matching filming.py::expose, which
-    // calls apply_halation_um on `raw`). Skipped under the spatial-OFF goldens.
-    if (params.spatial_effects && params.halation.active) {
+    // In-emulsion scatter + back-reflection halation, applied to the float64
+    // irradiance before the log10 (matching filming.py::expose, which calls
+    // apply_halation_um on `raw`). Self-gated on halation.active (set by
+    // digest_halation_params only when the spatial digest is on and the preset is
+    // known), so the spatial-OFF goldens still skip it.
+    if (params.halation.active) {
         apply_halation_um(raw.data(), width, height, params.halation,
                           params.pixel_size_um);
     }
@@ -498,14 +498,19 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // so the default goldens (negative film) stay bit-exact.
     if (params.bw_exposure_correction != 1.0) {
         const double c = params.bw_exposure_correction;
-        for (int i = 0; i < npix * 3; ++i) raw[i] *= c;
+        parallel_for(0, npix * 3, [&](int lo, int hi) {
+            for (int i = lo; i < hi; ++i) raw[i] *= c;
+        });
     }
 
-    // log_raw = log10(fmax(raw, 0) + 1e-10).
-    for (int i = 0; i < npix * 3; ++i) {
-        double lr = std::log10(std::fmax(raw[i], 0.0) + 1e-10);
-        log_raw_out[i] = static_cast<float>(lr);
-    }
+    // log_raw = log10(fmax(raw, 0) + 1e-10). Element-wise -> deterministic
+    // parallel chunks (byte-identical to the serial loop for any thread count).
+    parallel_for(0, npix * 3, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) {
+            double lr = std::log10(std::fmax(raw[i], 0.0) + 1e-10);
+            log_raw_out[i] = static_cast<float>(lr);
+        }
+    });
 }
 
 void develop(const float* log_raw, int width, int height, const Profile& film,
@@ -523,13 +528,15 @@ void develop(const float* log_raw, int width, int height, const Profile& film,
                                     params.density_curve_gamma, density_cmy_out);
 
     // apply_density_correction_dir_couplers. The spatial variant diffuses the
-    // inhibitor correction (Gaussian + exponential tail) when spatial effects are
-    // on; it delegates to the pointwise path when diffusion_size_um == 0.
+    // inhibitor correction (Gaussian + exponential tail); it self-gates and
+    // delegates to the pointwise path when diffusion_size_um == 0 (the digest
+    // zeroes the size when the spatial digest is off, mirroring the oracle's
+    // deactivate_spatial_effects).
     apply_density_correction_dir_couplers_spatial(
         density_cmy_out, width, height, log_raw, film.log_exposure.data(),
         ndc.data(), n, params.dir_couplers, film.is_positive(),
         params.density_curve_gamma,
-        params.spatial_effects ? params.pixel_size_um : 0.0, density_cmy_out);
+        params.pixel_size_um, density_cmy_out);
 
     // Stochastic grain (AgX particle model). Identity unless grain.active (set by
     // digest_grain_params when grain_active && stochastic effects are on). The

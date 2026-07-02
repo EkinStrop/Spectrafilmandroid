@@ -123,6 +123,11 @@ private class LutRenderer(private val onUnavailable: () -> Unit) : GLSurfaceView
     @Volatile private var pendingProxy: LinearImage? = null
     @Volatile private var pendingLut: CubeLut? = null
 
+    // Last successfully submitted inputs, kept so a recreated GL context (surface
+    // destroyed/recreated, e.g. backgrounding) can re-upload instead of staying black.
+    @Volatile private var lastProxy: LinearImage? = null
+    @Volatile private var lastLut: CubeLut? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private var reportedFail = false
 
@@ -139,9 +144,17 @@ private class LutRenderer(private val onUnavailable: () -> Unit) : GLSurfaceView
     fun submit(proxy: LinearImage, lut: CubeLut) {
         pendingProxy = proxy
         pendingLut = lut
+        lastProxy = proxy
+        lastLut = lut
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+        // A fresh GL context lost every texture: forget the uploads and re-arm the
+        // pending slots from the last submission so onDrawFrame re-uploads.
+        haveProxy = false
+        haveLut = false
+        pendingProxy = pendingProxy ?: lastProxy
+        pendingLut = pendingLut ?: lastLut
         program = buildProgram(VERT, FRAG)
         if (program == 0) {
             // Shader compile/link failed on this device/driver — tell the caller so it can

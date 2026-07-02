@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../kernels/interp.h"
+#include "../kernels/parallel.h"
 
 namespace spk {
 
@@ -38,8 +39,14 @@ void interpolate_exposure_to_density(const float* log_exposure_rgb, int npix,
         }
     }
     // fp is density_curves (n,3); channel-specific axis -> common_axis = false.
-    interp1d_planar3(log_exposure_rgb, npix, xp.data(), /*common_axis=*/false,
-                     density_curves, n, density_cmy_out);
+    // Chunked through the deterministic parallel_for (pixels are independent and
+    // the kernel runs serially inside each chunk), so the output is byte-identical
+    // to the plain serial call for any thread count.
+    parallel_for(0, npix, [&](int lo, int hi) {
+        interp1d_planar3(log_exposure_rgb + static_cast<size_t>(lo) * 3, hi - lo,
+                         xp.data(), /*common_axis=*/false, density_curves, n,
+                         density_cmy_out + static_cast<size_t>(lo) * 3);
+    });
 }
 
 void interpolate_exposure_to_density(const float* log_exposure_rgb, int npix,

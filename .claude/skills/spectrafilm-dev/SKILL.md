@@ -164,10 +164,13 @@ g++ -std=c++17 -O2 -pthread -I. -I../../../../../tools/parity \
 
 `-pthread` is required (`kernels/parallel`). A test passes when its output has **no `FAIL`
 line**. `SPK_NUM_THREADS` overrides `hardware_concurrency()`; the parity tests pin 1 vs 8 to
-prove byte-identical output. The CI `engine-parity` job gates 15 tests: `simulate_e2e`,
-`filming`, `spatial`, `crop_resize`, `autoexposure`, `diffusion`(+`_e2e`), `lut_accel`,
-`scanner_lut_e2e`, `enlarger_lut_e2e`, `output_spaces`, `lensblur`, `tonecurve`, `half`,
-`parallel`. Copy each test's argv from `.github/workflows/ci.yml` rather than guessing.
+prove byte-identical output. The CI `engine-parity` job gates **33 tests** — the full
+authoritative list + per-test argv live in `.github/workflows/ci.yml` (copy from there rather
+than guessing); the annotated list is in CLAUDE.md. Highlights beyond the core stage gates:
+`small_preview_aa`, `print_curves_morph`, `np_interp`, `gamut_out_aces`/`gamut_in_xy`,
+`spatial_decouple_e2e` (per-effect spatial gating), `print_spatial_e2e` (print-route filming
+spatial branch), and `simulate_e2e`'s memo scenarios (both film-density slots + the
+print-density memo + per-param key completeness).
 
 Kotlin / build:
 

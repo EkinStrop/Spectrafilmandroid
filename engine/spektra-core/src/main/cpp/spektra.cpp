@@ -178,31 +178,47 @@ struct spk_engine {
     std::map<std::string, spk::Profile> profile_cache;   // id -> parsed Profile
     std::map<std::string, spk::NdArray> tc_lut_cache;    // film id -> filming tc_lut
 
-    // PRINT-ROUTE film_density_cmy memo (PERF). Unlike profile_cache/tc_lut_cache
-    // above — which are keyed by an IMMUTABLE bundled-asset id and so can never go
-    // stale — this single-slot cache is keyed by a CONTENT+PARAM DIGEST
-    // (compute_film_cache_key): a 64-bit FNV-1a hash folding the post-preprocess
-    // expose-input buffer (image content + auto-exposure + crop/rescale results)
-    // plus every filming-side input param. The key is therefore NOT an id; it is a
-    // fingerprint of the exact inputs to expose()+develop(). On the PRINT route
-    // (run_print) the filming step runs spatial-OFF and grain-OFF, so its output is
-    // a PURE deterministic function of those inputs with NO stochastic/grain state —
-    // making the memo byte-identical to a fresh expose+develop (a memo, not an
-    // approximation), exactly like the 54d4d3d tc_lut memo. It lets a downstream-only
-    // edit (printing/scanning/tone-curve params) reuse filming and skip expose+develop.
-    // Single-slot (only the most recent inputs); replaced on every miss. Scope is the
-    // print route ONLY — run_scan_film never consults it. Guarded by film_cache_mutex.
+    // FILM-DENSITY (film_density_cmy) memo, one slot PER ROUTE (PERF). Unlike
+    // profile_cache/tc_lut_cache above — which are keyed by an IMMUTABLE
+    // bundled-asset id and so can never go stale — these single-slot caches are
+    // keyed by a CONTENT+PARAM DIGEST (compute_film_cache_key): a 64-bit FNV-1a
+    // hash folding the post-preprocess expose-input buffer (image content +
+    // auto-exposure + crop/rescale results) plus every filming-side input param,
+    // INCLUDING the deterministic spatial shape params (halation/scatter, DIR
+    // diffusion, camera diffusion, lens blur, resize pixel size, bw exposure
+    // correction). The key is therefore NOT an id; it is a fingerprint of the
+    // exact inputs to expose()+develop(). With grain OFF that pair is a PURE
+    // deterministic function of those inputs (the spatial effects are fixed
+    // convolutions), making the memo byte-identical to a fresh expose+develop (a
+    // memo, not an approximation). It lets a downstream-only edit (printing/
+    // scanning/tone-curve params) reuse filming and skip expose+develop. Grain
+    // (stochastic) and debug-tap renders always bypass. Two slots — the print
+    // route and the scan route fold different inputs (bw exposure correction) and
+    // route A/B-ing must not thrash a shared slot. Guarded by film_cache_mutex.
     struct FilmCacheEntry {
         int width = 0;
         int height = 0;
         std::vector<float> film_density_cmy;
     };
+    struct FilmMemoSlot {
+        uint64_t key = 0;      // 0 == empty slot (no valid entry yet)
+        bool valid = false;    // guards the all-zero-key edge case
+        FilmCacheEntry entry;
+        uint64_t hits = 0;     // host-test observability (NOT public ABI)
+        uint64_t misses = 0;
+    };
+    enum FilmMemoRoute { kMemoPrint = 0, kMemoScan = 1 };
     std::mutex film_cache_mutex;
-    uint64_t film_cache_key = 0;        // 0 == empty slot (no valid entry yet)
-    bool film_cache_valid = false;      // guards the all-zero-key edge case
-    FilmCacheEntry film_cache;
-    uint64_t film_cache_hits = 0;       // host-test observability (NOT public ABI)
-    uint64_t film_cache_misses = 0;
+    FilmMemoSlot film_memo[2];
+
+    // PRINT-DENSITY (print_expose + print_develop) memo, keyed by the
+    // film_density_cmy buffer CONTENT + every printing-stage input
+    // (compute_print_density_key). Content-hashing makes it correct
+    // independently of the film memo (grain or a film bypass included: both
+    // print stages are deterministic functions of film bytes + params). Lets an
+    // output-only edit (scanner / output space / tone curve / glare) rerun
+    // scan() alone. The entry buffer holds print_density_cmy. Same mutex.
+    FilmMemoSlot print_density_memo;
 };
 
 // Host-only accessors for the print-route film_density_cmy cache counters. The host
@@ -216,12 +232,32 @@ struct spk_engine {
 uint64_t spk_test_film_cache_hits(spk_engine* eng) {
     if (!eng) return 0;
     std::lock_guard<std::mutex> g(eng->film_cache_mutex);
-    return eng->film_cache_hits;
+    return eng->film_memo[spk_engine::kMemoPrint].hits;
 }
 uint64_t spk_test_film_cache_misses(spk_engine* eng) {
     if (!eng) return 0;
     std::lock_guard<std::mutex> g(eng->film_cache_mutex);
-    return eng->film_cache_misses;
+    return eng->film_memo[spk_engine::kMemoPrint].misses;
+}
+uint64_t spk_test_scan_film_cache_hits(spk_engine* eng) {
+    if (!eng) return 0;
+    std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+    return eng->film_memo[spk_engine::kMemoScan].hits;
+}
+uint64_t spk_test_scan_film_cache_misses(spk_engine* eng) {
+    if (!eng) return 0;
+    std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+    return eng->film_memo[spk_engine::kMemoScan].misses;
+}
+uint64_t spk_test_print_density_cache_hits(spk_engine* eng) {
+    if (!eng) return 0;
+    std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+    return eng->print_density_memo.hits;
+}
+uint64_t spk_test_print_density_cache_misses(spk_engine* eng) {
+    if (!eng) return 0;
+    std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+    return eng->print_density_memo.misses;
 }
 #endif
 
@@ -316,7 +352,9 @@ static const spk::NdArray& engine_tc_lut(spk_engine* eng,
                                          float spectral_gaussian_blur,
                                          bool apply_window, bool apply_surface,
                                          const float* filter_uv,
-                                         const float* filter_ir) {
+                                         const float* filter_ir,
+                                         spk::InputGamutCompress input_gamut_compress =
+                                             spk::InputGamutCompress::kOff) {
     // Compose a key that folds the blur sigma's exact IEEE-754 bytes plus the
     // window/surface toggles and the camera UV/IR band-pass so distinct adaptations
     // (or float jitter) never alias. The DEFAULT (blur==0, window on, surface off,
@@ -325,9 +363,11 @@ static const spk::NdArray& engine_tc_lut(spk_engine* eng,
     const bool band_pass_on =
         filter_uv != nullptr && filter_ir != nullptr &&
         (filter_uv[0] > 0.0f || filter_ir[0] > 0.0f);
+    const bool gamut_in_on =
+        input_gamut_compress != spk::InputGamutCompress::kOff;
     std::string key = film_id;
     if (spectral_gaussian_blur > 0.0f || !apply_window || apply_surface ||
-        band_pass_on) {
+        band_pass_on || gamut_in_on) {
         key.push_back('|');
         const unsigned char* b =
             reinterpret_cast<const unsigned char*>(&spectral_gaussian_blur);
@@ -349,6 +389,16 @@ static const spk::NdArray& engine_tc_lut(spk_engine* eng,
             for (size_t i = 0; i < 3 * sizeof(float); ++i)
                 key.push_back(static_cast<char>(fr[i]));
         }
+        // Fold the input gamut-compression mode only when active, so the default
+        // (kOff) key is byte-identical to the pre-feature film-id key.
+        if (gamut_in_on) {
+            key.push_back('G');
+            const int32_t gmode = static_cast<int32_t>(input_gamut_compress);
+            const unsigned char* gb =
+                reinterpret_cast<const unsigned char*>(&gmode);
+            for (size_t i = 0; i < sizeof(int32_t); ++i)
+                key.push_back(static_cast<char>(gb[i]));
+        }
     }
     {
         std::lock_guard<std::mutex> g(eng->cache_mutex);
@@ -359,7 +409,8 @@ static const spk::NdArray& engine_tc_lut(spk_engine* eng,
                                                  kD55Illuminant,
                                                  spectral_gaussian_blur,
                                                  apply_window, apply_surface,
-                                                 filter_uv, filter_ir);
+                                                 filter_uv, filter_ir,
+                                                 input_gamut_compress);
     std::lock_guard<std::mutex> g(eng->cache_mutex);
     return eng->tc_lut_cache.emplace(key, std::move(lut)).first->second;
 }
@@ -375,10 +426,10 @@ static inline uint64_t fnv1a64(uint64_t h, const void* data, size_t n) {
     return h;
 }
 
-// Compute the single-slot film_density_cmy cache key for the PRINT route. The key
-// is a 64-bit FNV-1a hash folding EVERY input that the print-route filming step
-// (expose + develop, spatial-OFF / grain-OFF) consumes, so two calls collide IFF
-// their film_density_cmy is byte-identical:
+// Compute the film_density_cmy memo key (shared by BOTH routes). The key is a
+// 64-bit FNV-1a hash folding EVERY input that the filming step (expose +
+// develop, grain-OFF) consumes, so two calls collide IFF their film_density_cmy
+// is byte-identical:
 //   - the POST-preprocess `rgb` float64 buffer (the actual expose() input): this
 //     already folds in image content + auto-exposure + crop/rescale geometry,
 //   - width, height, input color_space,
@@ -386,15 +437,23 @@ static inline uint64_t fnv1a64(uint64_t h, const void* data, size_t n) {
 //   - exposure_compensation_ev, density_curve_gamma (the FILM gamma, not print gamma),
 //     rgb_to_raw_method, spectral_gaussian_blur (blurs the filming tc_lut),
 //   - the DIR pointwise params (active, amount, inhibition same/inter-layer),
+//   - the DETERMINISTIC SPATIAL SHAPE params (Option A): the halation/scatter
+//     user set, the DIR diffusion trio, the camera-diffusion filter set, the
+//     camera lens blur, plus the two caller-supplied locals `resize_pixel_size_um`
+//     (µm->px conversion for every spatial kernel) and `bw_exposure_correction`
+//     (multiplies raw inside expose on the scan route; print passes 1.0) — so a
+//     spatial-ON render memoizes too and any shape edit changes the key,
 //   - DEFENSIVELY: the geometry params (crop, crop_center, crop_size, upscale_factor,
-//     film_format_mm) and the currently-forced-off toggles (grain/spatial/halation/
-//     diffusion/lens_blur) — so a future change that begins to influence filming can
-//     never silently reuse a stale entry.
+//     film_format_mm) and the branch toggles (grain/halation/glare/diffusion) — so a
+//     future change that begins to influence filming can never silently reuse a
+//     stale entry.
 // IMPORTANT: the rgb buffer is the post-preprocess expose input, so geometry params
 // are already reflected in it; folding them too is belt-and-suspenders, not required.
 static uint64_t compute_film_cache_key(const std::vector<double>& rgb, int width,
                                        int height, int input_color_space,
-                                       const spk_params* p) {
+                                       const spk_params* p,
+                                       double resize_pixel_size_um,
+                                       double bw_exposure_correction) {
     uint64_t h = 0xcbf29ce484222325ULL;  // FNV offset basis
     // 1) The expose input buffer (content + AE + crop/rescale already baked in).
     h = fnv1a64(h, rgb.data(), rgb.size() * sizeof(double));
@@ -426,6 +485,13 @@ static uint64_t compute_film_cache_key(const std::vector<double>& rgb, int width
     // so the digest is honest.
     h = fnv1a64(h, p->camera_filter_uv, sizeof(p->camera_filter_uv));
     h = fnv1a64(h, p->camera_filter_ir, sizeof(p->camera_filter_ir));
+    // Input gamut compression bakes a radial-to-locus chromaticity remap into the
+    // filming tc_lut (build_filming_tc_lut), so it changes film_density_cmy and MUST
+    // be part of the print-route memo key — otherwise toggling it returns a stale
+    // cached negative. Default kOff (0) keeps the key unchanged for the default path;
+    // fold ALWAYS so the digest is honest (parity-transparent: a key change only ever
+    // forces a one-time recompute to the correct value).
+    h = fnv1a64(h, &p->input_gamut_compress, sizeof(p->input_gamut_compress));
     // Highlight boost (numba_boost_hightlights.boost_highlights) runs in expose()
     // BEFORE the log10, so it changes film_density_cmy and MUST be part of the
     // print-route memo key — otherwise a boost edit returns a stale cached negative.
@@ -435,14 +501,58 @@ static uint64_t compute_film_cache_key(const std::vector<double>& rgb, int width
     h = fnv1a64(h, &p->halation_boost_ev, sizeof(p->halation_boost_ev));
     h = fnv1a64(h, &p->halation_boost_range, sizeof(p->halation_boost_range));
     h = fnv1a64(h, &p->halation_protect_ev, sizeof(p->halation_protect_ev));
-    // 5) DIR-coupler pointwise params (the only spatial-independent coupler inputs).
+    // 5) DIR-coupler pointwise params.
     h = fnv1a64(h, &p->dir_couplers_active, sizeof(p->dir_couplers_active));
     h = fnv1a64(h, &p->dir_amount, sizeof(p->dir_amount));
     h = fnv1a64(h, &p->dir_inhibition_samelayer, sizeof(p->dir_inhibition_samelayer));
     h = fnv1a64(h, &p->dir_inhibition_interlayer, sizeof(p->dir_inhibition_interlayer));
-    // 6) DEFENSIVE: geometry params (already folded via `rgb`, repeated for safety)
-    //    + the currently-forced-off toggles. If any of these ever start influencing
-    //    the print-route filming output, the key changes and the memo can't go stale.
+    // 6) Deterministic spatial shape params (Option A). Every field a spatial
+    //    kernel reads must be here, or a shape-only edit would alias a stale
+    //    entry (the key-completeness scenarios in test_simulate_e2e assert this
+    //    per param). Folding a field that is currently inert only forces a
+    //    one-time recompute — parity-transparent.
+    //    DIR diffusion trio (spatial inhibitor diffusion in develop):
+    h = fnv1a64(h, &p->dir_diffusion_size_um, sizeof(p->dir_diffusion_size_um));
+    h = fnv1a64(h, &p->dir_diffusion_tail_um, sizeof(p->dir_diffusion_tail_um));
+    h = fnv1a64(h, &p->dir_diffusion_tail_weight, sizeof(p->dir_diffusion_tail_weight));
+    //    Halation/scatter user set (apply_user_halation, minus the boost trio
+    //    already folded above):
+    h = fnv1a64(h, &p->halation_scatter_amount, sizeof(p->halation_scatter_amount));
+    h = fnv1a64(h, &p->halation_scatter_spatial_scale,
+                sizeof(p->halation_scatter_spatial_scale));
+    h = fnv1a64(h, p->halation_scatter_core_um, sizeof(p->halation_scatter_core_um));
+    h = fnv1a64(h, p->halation_scatter_tail_um, sizeof(p->halation_scatter_tail_um));
+    h = fnv1a64(h, p->halation_scatter_tail_weight,
+                sizeof(p->halation_scatter_tail_weight));
+    h = fnv1a64(h, &p->halation_halation_amount, sizeof(p->halation_halation_amount));
+    h = fnv1a64(h, &p->halation_halation_spatial_scale,
+                sizeof(p->halation_halation_spatial_scale));
+    h = fnv1a64(h, &p->halation_n_bounces, sizeof(p->halation_n_bounces));
+    h = fnv1a64(h, &p->halation_bounce_decay, sizeof(p->halation_bounce_decay));
+    h = fnv1a64(h, &p->halation_renormalize, sizeof(p->halation_renormalize));
+    //    Camera optical diffusion filter (9 shape fields; active folded below):
+    h = fnv1a64(h, &p->camera_diffusion_strength, sizeof(p->camera_diffusion_strength));
+    h = fnv1a64(h, &p->camera_diffusion_spatial_scale,
+                sizeof(p->camera_diffusion_spatial_scale));
+    h = fnv1a64(h, &p->camera_diffusion_halo_warmth,
+                sizeof(p->camera_diffusion_halo_warmth));
+    h = fnv1a64(h, &p->camera_diffusion_core_intensity,
+                sizeof(p->camera_diffusion_core_intensity));
+    h = fnv1a64(h, &p->camera_diffusion_core_size, sizeof(p->camera_diffusion_core_size));
+    h = fnv1a64(h, &p->camera_diffusion_halo_intensity,
+                sizeof(p->camera_diffusion_halo_intensity));
+    h = fnv1a64(h, &p->camera_diffusion_halo_size, sizeof(p->camera_diffusion_halo_size));
+    h = fnv1a64(h, &p->camera_diffusion_bloom_intensity,
+                sizeof(p->camera_diffusion_bloom_intensity));
+    h = fnv1a64(h, &p->camera_diffusion_bloom_size,
+                sizeof(p->camera_diffusion_bloom_size));
+    //    Caller-supplied locals: the µm->px scale every spatial kernel divides by,
+    //    and the scan-route bw exposure correction applied inside expose().
+    h = fnv1a64(h, &resize_pixel_size_um, sizeof(resize_pixel_size_um));
+    h = fnv1a64(h, &bw_exposure_correction, sizeof(bw_exposure_correction));
+    // 7) DEFENSIVE: geometry params (already folded via `rgb`, repeated for safety)
+    //    + the branch toggles. If any of these ever start influencing the filming
+    //    output differently, the key changes and the memo can't go stale.
     h = fnv1a64(h, &p->crop, sizeof(p->crop));
     h = fnv1a64(h, p->crop_center, sizeof(p->crop_center));
     h = fnv1a64(h, p->crop_size, sizeof(p->crop_size));
@@ -457,26 +567,123 @@ static uint64_t compute_film_cache_key(const std::vector<double>& rgb, int width
     return h;
 }
 
+// Compute the print-density (print_expose + print_develop) memo key. Keyed by
+// the film_density_cmy buffer CONTENT — not by how it was produced — so this
+// memo is correct independently of the film memo's key completeness (grain, a
+// film-memo bypass, anything: identical film bytes + identical printing inputs
+// => byte-identical print_density_cmy, both stages being deterministic). Folds
+// every input the printing stage consumes AFTER film density exists:
+// profiles (enlarger illuminant/paper curves + the film-derived midgray), the
+// dichroic neutral CC + shifts, print gamma/exposure/midgray toggles, the s023
+// morph set, the preflash trio, the enlarger LUT settings, the enlarger
+// diffusion filter (+ the µm->px scale), and the print-route b/w correction
+// inputs (they set pparams.bw_exposure_correction inside print_expose).
+static uint64_t compute_print_density_key(const std::vector<float>& film_density_cmy,
+                                          int width, int height,
+                                          const spk_params* p,
+                                          double resize_pixel_size_um) {
+    uint64_t h = 0xcbf29ce484222325ULL;  // FNV offset basis
+    h = fnv1a64(h, film_density_cmy.data(),
+                film_density_cmy.size() * sizeof(float));
+    h = fnv1a64(h, &width, sizeof(width));
+    h = fnv1a64(h, &height, sizeof(height));
+    if (p->film_profile) h = fnv1a64(h, p->film_profile, std::strlen(p->film_profile));
+    if (p->print_profile) h = fnv1a64(h, p->print_profile, std::strlen(p->print_profile));
+    // tc_lut shape (engine_tc_lut key inputs): the midgray exposure factor inside
+    // print_expose is computed FROM the tc_lut directly — not through the film
+    // bytes — so these film-side params are genuine printing-stage inputs and
+    // must not alias across the content hash.
+    h = fnv1a64(h, &p->spectral_gaussian_blur, sizeof(p->spectral_gaussian_blur));
+    h = fnv1a64(h, &p->apply_hanatos_window, sizeof(p->apply_hanatos_window));
+    h = fnv1a64(h, &p->apply_hanatos_surface, sizeof(p->apply_hanatos_surface));
+    h = fnv1a64(h, p->camera_filter_uv, sizeof(p->camera_filter_uv));
+    h = fnv1a64(h, p->camera_filter_ir, sizeof(p->camera_filter_ir));
+    h = fnv1a64(h, &p->input_gamut_compress, sizeof(p->input_gamut_compress));
+    // Dichroic neutral CC (database flag + explicit values) + user shifts.
+    h = fnv1a64(h, &p->neutral_print_filters_from_database,
+                sizeof(p->neutral_print_filters_from_database));
+    h = fnv1a64(h, &p->c_filter_neutral, sizeof(p->c_filter_neutral));
+    h = fnv1a64(h, &p->m_filter_neutral, sizeof(p->m_filter_neutral));
+    h = fnv1a64(h, &p->y_filter_neutral, sizeof(p->y_filter_neutral));
+    h = fnv1a64(h, &p->m_filter_shift, sizeof(p->m_filter_shift));
+    h = fnv1a64(h, &p->y_filter_shift, sizeof(p->y_filter_shift));
+    // Print gamma / exposure / midgray balance.
+    h = fnv1a64(h, &p->print_density_curve_gamma, sizeof(p->print_density_curve_gamma));
+    h = fnv1a64(h, &p->exposure_compensation_ev, sizeof(p->exposure_compensation_ev));
+    h = fnv1a64(h, &p->normalize_print_exposure, sizeof(p->normalize_print_exposure));
+    h = fnv1a64(h, &p->print_exposure_compensation,
+                sizeof(p->print_exposure_compensation));
+    h = fnv1a64(h, &p->print_exposure, sizeof(p->print_exposure));
+    // s023 print density-curve morph (consumed in print_develop).
+    h = fnv1a64(h, &p->print_morph_active, sizeof(p->print_morph_active));
+    h = fnv1a64(h, &p->print_morph_gamma_factor, sizeof(p->print_morph_gamma_factor));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_fast,
+                sizeof(p->print_morph_gamma_factor_fast));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_slow,
+                sizeof(p->print_morph_gamma_factor_slow));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_red,
+                sizeof(p->print_morph_gamma_factor_red));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_green,
+                sizeof(p->print_morph_gamma_factor_green));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_blue,
+                sizeof(p->print_morph_gamma_factor_blue));
+    h = fnv1a64(h, &p->print_morph_developer_exhaustion,
+                sizeof(p->print_morph_developer_exhaustion));
+    // Enlarger preflash.
+    h = fnv1a64(h, &p->preflash_exposure, sizeof(p->preflash_exposure));
+    h = fnv1a64(h, &p->preflash_m_filter_shift, sizeof(p->preflash_m_filter_shift));
+    h = fnv1a64(h, &p->preflash_y_filter_shift, sizeof(p->preflash_y_filter_shift));
+    // Opt-in enlarger 3D-LUT acceleration (changes the print_expose path).
+    h = fnv1a64(h, &p->use_enlarger_lut, sizeof(p->use_enlarger_lut));
+    h = fnv1a64(h, &p->lut_resolution, sizeof(p->lut_resolution));
+    h = fnv1a64(h, p->grain_density_min, sizeof(p->grain_density_min));
+    // Enlarger optical diffusion filter (print_expose spatial pass) + µm->px.
+    h = fnv1a64(h, &p->enlarger_diffusion_active, sizeof(p->enlarger_diffusion_active));
+    h = fnv1a64(h, &p->enlarger_diffusion_strength,
+                sizeof(p->enlarger_diffusion_strength));
+    h = fnv1a64(h, &p->enlarger_diffusion_spatial_scale,
+                sizeof(p->enlarger_diffusion_spatial_scale));
+    h = fnv1a64(h, &p->enlarger_diffusion_halo_warmth,
+                sizeof(p->enlarger_diffusion_halo_warmth));
+    h = fnv1a64(h, &p->enlarger_diffusion_core_intensity,
+                sizeof(p->enlarger_diffusion_core_intensity));
+    h = fnv1a64(h, &p->enlarger_diffusion_core_size,
+                sizeof(p->enlarger_diffusion_core_size));
+    h = fnv1a64(h, &p->enlarger_diffusion_halo_intensity,
+                sizeof(p->enlarger_diffusion_halo_intensity));
+    h = fnv1a64(h, &p->enlarger_diffusion_halo_size,
+                sizeof(p->enlarger_diffusion_halo_size));
+    h = fnv1a64(h, &p->enlarger_diffusion_bloom_intensity,
+                sizeof(p->enlarger_diffusion_bloom_intensity));
+    h = fnv1a64(h, &p->enlarger_diffusion_bloom_size,
+                sizeof(p->enlarger_diffusion_bloom_size));
+    h = fnv1a64(h, &resize_pixel_size_um, sizeof(resize_pixel_size_um));
+    // Print-route b/w correction inputs (drive pparams.bw_exposure_correction).
+    h = fnv1a64(h, &p->scanner_white_correction, sizeof(p->scanner_white_correction));
+    h = fnv1a64(h, &p->scanner_black_correction, sizeof(p->scanner_black_correction));
+    h = fnv1a64(h, &p->scanner_white_level, sizeof(p->scanner_white_level));
+    h = fnv1a64(h, &p->scanner_black_level, sizeof(p->scanner_black_level));
+    return h;
+}
+
 namespace {
 
 // Apply the user-controllable DIR-coupler params from spk_params onto the
 // digested struct. The per-channel gamma matrices stay film-specific (baked by
 // digest_filming_params, mirroring _apply_film_specifics which overwrites them
 // regardless of user input), so they are NOT taken from spk_params. The
-// diffusion fields are only meaningful in the spatial branch (the digest already
-// zeroes them when spatial is off, matching deactivate_spatial_effects). All
-// values default to the schema defaults, so default params are bit-exact.
-void apply_user_dir_couplers(spk::DirCouplersParams& dc, const spk_params* p,
-                             bool spatial) {
+// diffusion trio is copied unconditionally, matching the oracle's per-effect
+// self-gating: diffusion_size_um <= 0 delegates to the pointwise path
+// (model/couplers.cpp), so a zero size is a strict no-op. All values default to
+// the schema defaults, so default params are bit-exact.
+void apply_user_dir_couplers(spk::DirCouplersParams& dc, const spk_params* p) {
     dc.active = (p->dir_couplers_active != 0);
     dc.amount = p->dir_amount;
     dc.inhibition_samelayer = p->dir_inhibition_samelayer;
     dc.inhibition_interlayer = p->dir_inhibition_interlayer;
-    if (spatial) {
-        dc.diffusion_size_um = p->dir_diffusion_size_um;
-        dc.diffusion_tail_um = p->dir_diffusion_tail_um;
-        dc.diffusion_tail_weight = p->dir_diffusion_tail_weight;
-    }
+    dc.diffusion_size_um = p->dir_diffusion_size_um;
+    dc.diffusion_tail_um = p->dir_diffusion_tail_um;
+    dc.diffusion_tail_weight = p->dir_diffusion_tail_weight;
 }
 
 // Apply the user-controllable halation params from spk_params. The preset-driven
@@ -662,14 +869,17 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
         return SPK_ERR_INTERNAL;  // profile lacks filming fields
     }
 
-    // 2) Digested filming params (auto-exposure off; stochastic/grain off). The
-    //    spatial-effects branch (halation + in-emulsion scatter + DIR-coupler
-    //    diffusion) is enabled when the case requests it via halation_active
-    //    (mirroring deactivate_spatial_effects=False under scan_portra_spatial).
-    const bool spatial = (p->halation_active != 0);
+    // 2) Digested filming params (auto-exposure off; stochastic/grain off).
+    //    Spatial effects are PER-EFFECT gated, exactly like the oracle: absent
+    //    the deactivate_spatial_effects debug switch (no C-API equivalent —
+    //    callers express it by zeroing the per-effect fields), each effect runs
+    //    off its own params and a ZERO value is inert (params_builder.py +
+    //    per-effect self-gates, oracle c1d0e44). halation_active gates ONLY the
+    //    halation/scatter block, mirroring oracle HalationParams.active.
+    const bool halation_on = (p->halation_active != 0);
     const bool grain = (p->grain_active != 0);
     spk::FilmingParams fparams = spk::digest_filming_params(
-        film.is_negative(), spatial,
+        film.is_negative(), /*spatial_effects=*/true,
         !film.stock.empty() ? film.stock.c_str() : p->film_profile);
     fparams.exposure_compensation_ev = p->exposure_compensation_ev;
     const float g = p->density_curve_gamma != 0.0f ? p->density_curve_gamma : 1.0f;
@@ -677,27 +887,22 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     fparams.density_curve_gamma[1] = g;
     fparams.density_curve_gamma[2] = g;
     // DIR-coupler user params (amount / inhibition / diffusion); the per-channel
-    // gamma matrices stay film-specific (baked by the digest).
-    apply_user_dir_couplers(fparams.dir_couplers, p, spatial);
-    // Camera optical diffusion filter (issue #6 exposed-but-inert param). The
-    // oracle's digest_params zeroes camera.diffusion_filter.active under
-    // deactivate_spatial_effects=True, so the diffusion filter belongs to the
-    // spatial branch: it is only applied when spatial (== halation_active) is on.
+    // gamma matrices stay film-specific (baked by the digest). diffusion_size_um
+    // <= 0 self-gates to the pointwise path.
+    apply_user_dir_couplers(fparams.dir_couplers, p);
+    // Camera optical diffusion filter — self-gated on camera_diffusion_active
+    // (plus strength/scale inside apply_diffusion_filter_um), matching the
+    // oracle's gate on diffusion_filter.active alone.
     apply_user_diffusion_filter(fparams.diffusion_filter, p, /*is_camera=*/true);
-    if (!spatial) fparams.diffusion_filter.active = false;
     // Camera lens blur (camera.lens_blur_um) — applied in expose() between the
-    // diffusion filter and halation. The oracle's digest_params zeroes
-    // camera.lens_blur_um under deactivate_spatial_effects=True, so it lives in the
-    // spatial branch: only honoured when spatial (== halation_active) is on. Default
+    // diffusion filter and halation; self-gated on lens_blur_um > 0. Default
     // 0.0 µm => strict no-op, so default params stay bit-exact.
-    fparams.lens_blur_um = spatial ? static_cast<double>(p->lens_blur_um) : 0.0;
-    // pixel_size_um drives both the spatial kernels and the grain blur, so it
-    // must be set whenever either spatial effects or grain are active. It comes
-    // from the resize service (film_format_mm*1000/max(orig h,w), then /=
-    // upscale_factor), computed in preprocess_geometry above.
-    if (spatial || grain) {
-        fparams.pixel_size_um = resize_pixel_size_um;
-    }
+    fparams.lens_blur_um = static_cast<double>(p->lens_blur_um);
+    // pixel_size_um drives the spatial kernels and the grain blur. It comes from
+    // the resize service (film_format_mm*1000/max(orig h,w), then /=
+    // upscale_factor), computed in preprocess_geometry above. Inert while every
+    // spatial effect self-gates off.
+    fparams.pixel_size_um = resize_pixel_size_um;
     if (grain) {
         // grain_active && stochastic effects on -> AgX particle grain. The
         // density_max_curves are filled inside develop() from the film's
@@ -705,9 +910,7 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
         spk::digest_grain_params(fparams);
         apply_user_grain(fparams.grain, p);
     }
-    if (spatial) {
-        // pixel_size_um already set from the resize service above.
-        fparams.pixel_size_um = resize_pixel_size_um;
+    if (halation_on) {
         spk::digest_halation_params(fparams, film.use.c_str(),
                                     film.antihalation.c_str(), true);
         // halation user params (everything except the preset-baked sigma/strength).
@@ -733,7 +936,9 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
         tc_lut_ptr = &engine_tc_lut(eng, p->film_profile, film, p->spectral_gaussian_blur,
                                     p->apply_hanatos_window != 0,
                                     p->apply_hanatos_surface != 0,
-                                    p->camera_filter_uv, p->camera_filter_ir);
+                                    p->camera_filter_uv, p->camera_filter_ir,
+                                    static_cast<spk::InputGamutCompress>(
+                                        p->input_gamut_compress));
     } catch (const std::exception&) {
         return SPK_ERR_ASSET_IO;
     }
@@ -764,13 +969,57 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
             spk::exposure_correction_factor(film, bw_corr, /*filming_positive=*/true);
     }
 
-    std::vector<float> log_raw(static_cast<size_t>(npix) * 3);
-    spk::expose(rgb.data(), width, height, fparams, tc_lut, log_raw.data());
-    if (tap_log_raw) *tap_log_raw = log_raw;
-
-    // 5) develop(): log_raw -> density_cmy (+ DIR couplers, spatial diffusion if on).
+    // Scan-route film_density_cmy memo (the scan-route twin of the print memo
+    // below — see the spk_engine::film_memo comment). With grain off,
+    // expose()+develop() is a PURE deterministic function of the folded inputs;
+    // the key includes every spatial shape param (Option A) plus this route's
+    // bw_exposure_correction (applied to raw inside expose), so spatial-ON
+    // renders memoize and a downstream-only edit (scanner/output/tone-curve)
+    // skips filming entirely. Taps + grain bypass.
     std::vector<float> density_cmy(static_cast<size_t>(npix) * 3);
-    spk::develop(log_raw.data(), width, height, film, fparams, density_cmy.data());
+    const bool scan_tap_bypass =
+        (tap_log_raw != nullptr) || (tap_density_cmy != nullptr);
+    const bool use_scan_film_cache = !scan_tap_bypass && !grain;
+
+    bool scan_film_cache_hit = false;
+    if (use_scan_film_cache) {
+        const uint64_t key = compute_film_cache_key(
+            rgb, width, height, in->color_space, p, resize_pixel_size_um,
+            fparams.bw_exposure_correction);
+        std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+        auto& slot = eng->film_memo[spk_engine::kMemoScan];
+        if (slot.valid && slot.key == key &&
+            slot.entry.width == width && slot.entry.height == height &&
+            slot.entry.film_density_cmy.size() == density_cmy.size()) {
+            // HIT: copy the cached buffer out BY VALUE while holding the lock.
+            density_cmy = slot.entry.film_density_cmy;
+            ++slot.hits;
+            scan_film_cache_hit = true;
+        }
+        // MISS path is handled after unlocking (we don't compute under the lock).
+    }
+
+    if (!scan_film_cache_hit) {
+        std::vector<float> log_raw(static_cast<size_t>(npix) * 3);
+        spk::expose(rgb.data(), width, height, fparams, tc_lut, log_raw.data());
+        if (tap_log_raw) *tap_log_raw = log_raw;
+
+        // 5) develop(): log_raw -> density_cmy (+ DIR couplers, spatial diffusion if on).
+        spk::develop(log_raw.data(), width, height, film, fparams, density_cmy.data());
+        if (use_scan_film_cache) {
+            const uint64_t key = compute_film_cache_key(
+                rgb, width, height, in->color_space, p, resize_pixel_size_um,
+                fparams.bw_exposure_correction);
+            std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+            auto& slot = eng->film_memo[spk_engine::kMemoScan];
+            slot.entry.width = width;
+            slot.entry.height = height;
+            slot.entry.film_density_cmy = density_cmy;
+            slot.key = key;
+            slot.valid = true;
+            ++slot.misses;
+        }
+    }
     if (tap_density_cmy) *tap_density_cmy = density_cmy;
 
     if (!final_rgb) return SPK_OK;  // caller only wanted an earlier tap
@@ -780,15 +1029,19 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     sparams.scan_film = true;
     sparams.output_color_space = p->output_color_space;
     sparams.output_cctf_encoding = (p->output_cctf_encoding != 0);
-    if (spatial) {
-        // scanner.unsharp_mask = (sigma, amount); default (0.7, 0.7). scanner
-        // lens_blur (in pixels) is applied before the unsharp mask. Both are part
-        // of the spatial branch (the oracle's digest_params zeroes them under
-        // deactivate_spatial_effects=True), so they are only honoured when spatial.
-        sparams.unsharp_sigma = p->scanner_unsharp[0];
-        sparams.unsharp_amount = p->scanner_unsharp[1];
-        sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
-    }
+    // OPT-IN output gamut compression (scan_film route). Default kLegacyClip (0) keeps
+    // scan()'s existing final clip, so the default goldens stay byte-identical; the
+    // knee stays at the ScanningParams oracle production default (0,1,6).
+    sparams.output_gamut_compress =
+        static_cast<spk::OutputGamutCompress>(p->output_gamut_compress);
+    // scanner.unsharp_mask = (sigma, amount) + scanner lens_blur (pixels). Each
+    // self-gates inside scan() (sigma > 0, amount > 0, blur > 0), exactly the
+    // oracle's gates; the deactivate_spatial_effects debug switch is expressed by
+    // passing zeros. Threaded unconditionally so the scanner sharpening no longer
+    // rides on halation_active.
+    sparams.unsharp_sigma = p->scanner_unsharp[0];
+    sparams.unsharp_amount = p->scanner_unsharp[1];
+    sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
     // OPT-IN scanner 3D-LUT acceleration (settings.use_scanner_lut, default 0).
     // When off (the default + parity-gate path) scan() never constructs the LUT and
     // is byte-identical to the direct spectral evaluation. When on, scan() routes
@@ -863,7 +1116,9 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         tc_lut_ptr = &engine_tc_lut(eng, p->film_profile, film, p->spectral_gaussian_blur,
                                     p->apply_hanatos_window != 0,
                                     p->apply_hanatos_surface != 0,
-                                    p->camera_filter_uv, p->camera_filter_ir);
+                                    p->camera_filter_uv, p->camera_filter_ir,
+                                    static_cast<spk::InputGamutCompress>(
+                                        p->input_gamut_compress));
     } catch (const std::exception&) {
         return SPK_ERR_ASSET_IO;
     }
@@ -968,24 +1223,20 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         pparams.grain_density_min[1] = static_cast<double>(p->grain_density_min[1]);
         pparams.grain_density_min[2] = static_cast<double>(p->grain_density_min[2]);
     }
-    // Spatial branch toggle for the print route (mirrors the negative scan:
-    // deactivate_spatial_effects=False enables the spatial filters). Driven by
-    // halation_active, matching run_scan_film.
-    const bool print_spatial = (p->halation_active != 0);
+    // Halation/scatter gate for the print route's filming step. halation_active
+    // gates ONLY halation (its UI meaning), mirroring run_scan_film; every other
+    // spatial effect self-gates on its own params (zero = inert).
+    const bool print_halation_on = (p->halation_active != 0);
     // Stochastic branch toggle for the print route (mirrors the negative scan:
-    // deactivate_stochastic_effects=False enables grain + viewing glare). Used to
-    // gate the print-route viewing glare below.
+    // deactivate_stochastic_effects=False enables grain + viewing glare).
     const bool print_stochastic = (p->grain_active != 0);
-    // Enlarger optical diffusion filter (issue #6 exposed-but-inert param),
-    // applied in print_expose on the float64 print irradiance before the final
-    // log10. Gated on the spatial branch (the oracle's digest_params zeroes
-    // enlarger.diffusion_filter.active under deactivate_spatial_effects=True).
-    // Inactive by default -> strict no-op. pixel_size_um from the resize service
-    // drives the µm->pixel conversion when active.
+    // Enlarger optical diffusion filter, applied in print_expose on the float64
+    // print irradiance before the final log10. Self-gated on
+    // enlarger_diffusion_active (the oracle's only gate — deactivate_spatial_effects
+    // is expressed by zeroing .active). Inactive by default -> strict no-op.
+    // pixel_size_um from the resize service drives the µm->pixel conversion.
     apply_user_diffusion_filter(pparams.diffusion_filter, p, /*is_camera=*/false);
-    if (!print_spatial) pparams.diffusion_filter.active = false;
-    if (pparams.diffusion_filter.active)
-        pparams.pixel_size_um = resize_pixel_size_um;
+    pparams.pixel_size_um = resize_pixel_size_um;
 
     // Scanner BLACK/WHITE correction (print route). Active only when a correction is
     // enabled AND the print paper is NEGATIVE (color_reference.py's
@@ -1036,24 +1287,34 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     }
 
     // 4) Filming stage (rgb -> film density_cmy), reusing the bit-exact port.
-    //    The print route runs the negative with spatial+stochastic effects off
-    //    (matching the print_portra parity toggles), so only the pointwise
-    //    DIR-coupler user params apply here.
+    //    The print route now runs the SAME per-effect-gated filming as the scan
+    //    route — the oracle runs one FilmingStage on both routes, so the
+    //    negative carries its halation / scatter / DIR diffusion / lens blur /
+    //    grain into the print. Each effect self-gates on its own params.
     spk::FilmingParams fparams = spk::digest_filming_params(
-        film.is_negative(), /*spatial_effects=*/false,
+        film.is_negative(), /*spatial_effects=*/true,
         !film.stock.empty() ? film.stock.c_str() : p->film_profile);
     fparams.exposure_compensation_ev = p->exposure_compensation_ev;
     const float fg = p->density_curve_gamma != 0.0f ? p->density_curve_gamma : 1.0f;
     fparams.density_curve_gamma[0] = fg;
     fparams.density_curve_gamma[1] = fg;
     fparams.density_curve_gamma[2] = fg;
-    apply_user_dir_couplers(fparams.dir_couplers, p, /*spatial=*/false);
-    // The print route's negative-filming step runs with the spatial branch OFF
-    // (the print parity goldens keep deactivate_spatial_effects=True), so the
-    // camera diffusion filter is not applied here (it lives in the spatial
-    // branch). fparams.spatial_effects stays false -> the filming stage gate
-    // skips it regardless.
-    fparams.diffusion_filter.active = false;
+    apply_user_dir_couplers(fparams.dir_couplers, p);
+    apply_user_diffusion_filter(fparams.diffusion_filter, p, /*is_camera=*/true);
+    fparams.lens_blur_um = static_cast<double>(p->lens_blur_um);
+    fparams.pixel_size_um = resize_pixel_size_um;
+    if (print_stochastic) {
+        // grain_active -> AgX particle grain inside develop(), exactly as the
+        // scan route wires it. Deterministic seed; stays serial.
+        spk::digest_grain_params(fparams);
+        apply_user_grain(fparams.grain, p);
+    }
+    if (print_halation_on) {
+        spk::digest_halation_params(fparams, film.use.c_str(),
+                                    film.antihalation.c_str(), true);
+        // halation user params (everything except the preset-baked sigma/strength).
+        apply_user_halation(fparams.halation, p);
+    }
     // Highlight boost is NOT a spatial effect (it runs in filming.expose regardless of
     // deactivate_spatial_effects). The print route's negative-filming runs spatial-OFF,
     // so thread the boost params in directly; apply_highlight_boost gates on
@@ -1065,41 +1326,35 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
 
     // `rgb` (float64, crop/rescale applied) built by preprocess_geometry above.
 
-    // Print-route film_density_cmy memo. On this route filming runs spatial-OFF and
-    // grain-OFF (set above: dir spatial=false, diffusion_filter.active=false, and
-    // run_print never touches grain), so expose()+develop() is a PURE deterministic
-    // function of (rgb, width, height, color_space, filming params) with NO
-    // stochastic/grain state. We can therefore memoize the developed film_density_cmy
-    // in a single content-hashed slot on the engine and skip expose+develop on the
-    // next call whose filming inputs are byte-identical (a downstream-only edit such
-    // as enlarger filters, scanner, or tone curve). Everything downstream runs
-    // unchanged on every call, so the cache is transparent and bit-exact.
+    // Print-route film_density_cmy memo. With grain off, expose()+develop() is a
+    // PURE deterministic function of (rgb, width, height, color_space, filming
+    // params) — the deterministic spatial effects are fixed convolutions, and the
+    // key folds every spatial shape param (Option A) so spatial-ON renders
+    // memoize too. Everything downstream runs unchanged on every call, so the
+    // cache is transparent and bit-exact.
     //
     // Cache is BYPASSED (always recompute) when:
     //   (a) a debug tap (log_raw / film_density_cmy) is requested — keeps the tap
-    //       path byte-identical to today and avoids caching tap-only renders, AND
-    //   (b) DEFENSIVELY, if the print-route filming step would ever run with the
-    //       spatial OR grain branch on — converts a future parity break into a safe
-    //       bypass rather than serving a stochastic/spatial result from the memo.
+    //       path byte-identical and avoids caching tap-only renders, OR
+    //   (b) grain is on (stochastic).
     std::vector<float> film_density_cmy(static_cast<size_t>(npix) * 3);
     const bool tap_bypass = (tap_log_raw != nullptr) || (tap_film_density_cmy != nullptr);
-    // print_spatial/print_stochastic are the print route's branch toggles; on this
-    // route the filming step is run pointwise regardless, but if either branch is on
-    // we refuse to cache (and the recompute path below is unaffected).
-    const bool stochastic_or_spatial = print_spatial || print_stochastic;
-    const bool use_film_cache = !tap_bypass && !stochastic_or_spatial;
+    const bool use_film_cache = !tap_bypass && !print_stochastic;
 
     bool film_cache_hit = false;
     if (use_film_cache) {
         const uint64_t key = compute_film_cache_key(rgb, width, height,
-                                                    in->color_space, p);
+                                                    in->color_space, p,
+                                                    resize_pixel_size_um,
+                                                    /*bw_exposure_correction=*/1.0);
         std::lock_guard<std::mutex> g(eng->film_cache_mutex);
-        if (eng->film_cache_valid && eng->film_cache_key == key &&
-            eng->film_cache.width == width && eng->film_cache.height == height &&
-            eng->film_cache.film_density_cmy.size() == film_density_cmy.size()) {
+        auto& slot = eng->film_memo[spk_engine::kMemoPrint];
+        if (slot.valid && slot.key == key &&
+            slot.entry.width == width && slot.entry.height == height &&
+            slot.entry.film_density_cmy.size() == film_density_cmy.size()) {
             // HIT: copy the cached buffer out BY VALUE while holding the lock.
-            film_density_cmy = eng->film_cache.film_density_cmy;
-            ++eng->film_cache_hits;
+            film_density_cmy = slot.entry.film_density_cmy;
+            ++slot.hits;
             film_cache_hit = true;
         }
         // MISS path is handled after unlocking (we don't compute under the lock).
@@ -1114,25 +1369,61 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         if (use_film_cache) {
             // Store {width, height, film_density_cmy} + key under the lock, count miss.
             const uint64_t key = compute_film_cache_key(rgb, width, height,
-                                                        in->color_space, p);
+                                                        in->color_space, p,
+                                                        resize_pixel_size_um,
+                                                        /*bw_exposure_correction=*/1.0);
             std::lock_guard<std::mutex> g(eng->film_cache_mutex);
-            eng->film_cache.width = width;
-            eng->film_cache.height = height;
-            eng->film_cache.film_density_cmy = film_density_cmy;
-            eng->film_cache_key = key;
-            eng->film_cache_valid = true;
-            ++eng->film_cache_misses;
+            auto& slot = eng->film_memo[spk_engine::kMemoPrint];
+            slot.entry.width = width;
+            slot.entry.height = height;
+            slot.entry.film_density_cmy = film_density_cmy;
+            slot.key = key;
+            slot.valid = true;
+            ++slot.misses;
         }
     }
     if (tap_film_density_cmy) *tap_film_density_cmy = film_density_cmy;
 
-    // 4) Printing stage (film density -> enlarger expose -> print develop).
-    std::vector<float> print_log_raw(static_cast<size_t>(npix) * 3);
-    spk::print_expose(film, prnt, pparams, film_density_cmy.data(), width, height,
-                      print_log_raw.data());
+    // 4) Printing stage (film density -> enlarger expose -> print develop),
+    //    memoized on the film_density_cmy CONTENT + every printing input (see
+    //    compute_print_density_key). An output-only edit (scanner/output space/
+    //    tone curve/glare) therefore reruns scan() alone. Debug-tap renders
+    //    bypass, keeping the tap path byte-identical to a plain recompute.
     std::vector<float> print_density_cmy(static_cast<size_t>(npix) * 3);
-    spk::print_develop(prnt, pparams, print_log_raw.data(), npix,
-                       print_density_cmy.data());
+    const bool pd_tap_bypass = tap_bypass || (tap_print_density_cmy != nullptr);
+    bool pd_hit = false;
+    if (!pd_tap_bypass) {
+        const uint64_t pd_key = compute_print_density_key(
+            film_density_cmy, width, height, p, resize_pixel_size_um);
+        std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+        auto& slot = eng->print_density_memo;
+        if (slot.valid && slot.key == pd_key &&
+            slot.entry.width == width && slot.entry.height == height &&
+            slot.entry.film_density_cmy.size() == print_density_cmy.size()) {
+            print_density_cmy = slot.entry.film_density_cmy;  // holds print density
+            ++slot.hits;
+            pd_hit = true;
+        }
+    }
+    if (!pd_hit) {
+        std::vector<float> print_log_raw(static_cast<size_t>(npix) * 3);
+        spk::print_expose(film, prnt, pparams, film_density_cmy.data(), width, height,
+                          print_log_raw.data());
+        spk::print_develop(prnt, pparams, print_log_raw.data(), npix,
+                           print_density_cmy.data());
+        if (!pd_tap_bypass) {
+            const uint64_t pd_key = compute_print_density_key(
+                film_density_cmy, width, height, p, resize_pixel_size_um);
+            std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+            auto& slot = eng->print_density_memo;
+            slot.entry.width = width;
+            slot.entry.height = height;
+            slot.entry.film_density_cmy = print_density_cmy;  // holds print density
+            slot.key = pd_key;
+            slot.valid = true;
+            ++slot.misses;
+        }
+    }
     if (tap_print_density_cmy) *tap_print_density_cmy = print_density_cmy;
 
     if (!final_rgb) return SPK_OK;  // caller only wanted an earlier tap
@@ -1142,6 +1433,11 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     sparams.scan_film = false;
     sparams.output_color_space = p->output_color_space;
     sparams.output_cctf_encoding = (p->output_cctf_encoding != 0);
+    // OPT-IN output gamut compression (print route, same scan() position as scan_film).
+    // Default kLegacyClip (0) keeps the existing clip so print goldens stay byte-identical;
+    // the knee stays at the ScanningParams oracle production default (0,1,6).
+    sparams.output_gamut_compress =
+        static_cast<spk::OutputGamutCompress>(p->output_gamut_compress);
     // Viewing glare on the PRINT route (scanning.py applies glare = print_render.glare
     // here, in XYZ space, before XYZ->RGB). It is STOCHASTIC (per-pixel lognormal via
     // np.random.randn) so an active result is NOT bit-exact vs the oracle (exactly
@@ -1164,15 +1460,12 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         sparams.glare_blur = p->print_glare_blur;
     }
     // Scanner lens blur + unsharp on the print route (scanning.py runs the same
-    // _apply_blur_and_unsharp on both routes). Part of the spatial branch (the
-    // oracle zeroes scanner.lens_blur / unsharp under deactivate_spatial_effects),
-    // so honoured only when the print spatial branch is on; default 0 => no-op, so
-    // the print parity goldens stay bit-exact.
-    if (print_spatial) {
-        sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
-        sparams.unsharp_sigma = p->scanner_unsharp[0];
-        sparams.unsharp_amount = p->scanner_unsharp[1];
-    }
+    // _apply_blur_and_unsharp on both routes). Each self-gates inside scan()
+    // (sigma > 0, amount > 0, blur > 0) exactly like the oracle; the
+    // deactivate_spatial_effects debug switch is expressed by passing zeros.
+    sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
+    sparams.unsharp_sigma = p->scanner_unsharp[0];
+    sparams.unsharp_amount = p->scanner_unsharp[1];
     // OPT-IN scanner 3D-LUT acceleration on the print-scan route (same
     // settings.use_scanner_lut gate; scan_film == false so scan() picks the print
     // density-curve domain bounds). Default 0 => never constructed, print goldens
@@ -1393,6 +1686,11 @@ void spk_default_params(spk_params* p) {
     p->lut_resolution = 17;
     p->preview_max_size = 640;
     p->neutral_print_filters_from_database = 1;
+
+    // gamut compression: both OFF by the byte-identical sentinel (output kLegacyClip=0,
+    // input kOff=0) => the render/export path is bit-exact with every existing golden.
+    p->output_gamut_compress = 0;
+    p->input_gamut_compress = 0;
 
     // tone curve: OFF / identity by default (strict no-op => goldens stay bit-exact).
     p->tone_curve_active = 0;
@@ -1621,11 +1919,10 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     // represented and would make the lattice irreproducible. We copy the params
     // and disable those, keeping the pointwise color science intact: spectral
     // upsampling, density curves, pointwise DIR couplers, printing, scanning,
-    // and the output color-space transform. (Note: run_scan_film/run_print only
-    // enable the spatial branch when halation_active is set, and only read the
-    // scanner-unsharp / spatial diffusion fields in that branch; grain only runs
-    // when grain_active is set. Disabling those two toggles deactivates every
-    // spatial/stochastic path. We also clear the glare toggles for clarity.)
+    // and the output color-space transform. (Spatial effects are PER-EFFECT
+    // gated — each runs off its own params, zero = inert — so every spatial
+    // field must be zeroed here individually; halation_active alone no longer
+    // masters them.)
     spk_params bp = *p;
     bp.grain_active = 0;
     bp.halation_active = 0;
@@ -1633,6 +1930,11 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     bp.print_glare_active = 0;
     bp.camera_diffusion_active = 0;
     bp.enlarger_diffusion_active = 0;
+    bp.lens_blur_um = 0.0f;
+    bp.dir_diffusion_size_um = 0.0f;  // DIR stays pointwise (size 0), like deactivate
+    bp.scanner_lens_blur = 0.0f;
+    bp.scanner_unsharp[0] = 0.0f;
+    bp.scanner_unsharp[1] = 0.0f;
     // The .cube lattice is a synthetic count x 1 image; geometry transforms must
     // not touch it (a crop/rescale would corrupt the lattice -> wrong LUT).
     bp.crop = 0;

@@ -48,6 +48,10 @@
 // WITHOUT adding anything to spektra.h / the public ABI.
 extern uint64_t spk_test_film_cache_hits(spk_engine* eng);
 extern uint64_t spk_test_film_cache_misses(spk_engine* eng);
+extern uint64_t spk_test_scan_film_cache_hits(spk_engine* eng);
+extern uint64_t spk_test_scan_film_cache_misses(spk_engine* eng);
+extern uint64_t spk_test_print_density_cache_hits(spk_engine* eng);
+extern uint64_t spk_test_print_density_cache_misses(spk_engine* eng);
 
 namespace {
 
@@ -144,6 +148,11 @@ int main(int argc, char** argv) {
     p.density_curve_gamma = 1.0f;
     p.grain_active = 0;       // deterministic goldens: stochastic + spatial off.
     p.halation_active = 0;
+    // Spatial effects are per-effect gated (zero = inert); express the
+    // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+    p.dir_diffusion_size_um = 0.0f;
+    p.scanner_unsharp[0] = 0.0f;
+    p.scanner_unsharp[1] = 0.0f;
     p.dir_couplers_active = 1;
     p.glare_active = 0;
     p.scan_film = 1;
@@ -236,6 +245,11 @@ int main(int argc, char** argv) {
     pe.density_curve_gamma = 1.0f;
     pe.grain_active = 0;
     pe.halation_active = 0;
+    // Spatial effects are per-effect gated (zero = inert); express the
+    // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+    pe.dir_diffusion_size_um = 0.0f;
+    pe.scanner_unsharp[0] = 0.0f;
+    pe.scanner_unsharp[1] = 0.0f;
     pe.dir_couplers_active = 1;
     pe.glare_active = 0;
     pe.scan_film = 0;  // negative -> print -> scan route.
@@ -314,6 +328,11 @@ int main(int argc, char** argv) {
         q.density_curve_gamma = 1.0f;
         q.grain_active = 0;       // print route: spatial + stochastic OFF -> cache on
         q.halation_active = 0;
+        // Spatial effects are per-effect gated (zero = inert); express the
+        // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+        q.dir_diffusion_size_um = 0.0f;
+        q.scanner_unsharp[0] = 0.0f;
+        q.scanner_unsharp[1] = 0.0f;
         q.dir_couplers_active = 1;
         q.glare_active = 0;
         q.scan_film = 0;          // negative -> print -> scan route
@@ -394,18 +413,35 @@ int main(int argc, char** argv) {
             pass_film_cache = pass_film_cache && bi && hit_ok;
         }
 
-        // Scenario A (bypass): enabling the halation spatial master toggle trips the
-        // spektra.cpp cache guard (bypass when `halation_active || grain_active`), so
-        // the film_density_cmy cache machinery is NOT consulted at all. scanner_unsharp
-        // only takes effect once the spatial branch is on, so this case necessarily
-        // sets halation_active=1 — meaning it exercises the BYPASS path, not a cache
-        // hit. On a true bypass the cache block is skipped entirely, so NEITHER the
-        // hit NOR the miss counter moves; the output must still be byte-identical to a
-        // fresh cold engine.
+        // Scenario A (spatial memoizes): the memo key folds every deterministic
+        // spatial shape param (Option A), so a spatial-ON render is cacheable —
+        // the first run MISSES (stored), an identical repeat HITS, and both are
+        // byte-identical to a fresh cold engine.
         {
-            const char* label = "film_cache A: scanner_unsharp(+halation) cache-bypass";
-            // Re-warm the slot with P0 so a hit would be possible if the guard were
-            // absent; the bypass must leave both counters untouched regardless.
+            const char* label = "film_cache A: halation+unsharp spatial memoizes";
+            spk_params pe2 = make_p0();
+            pe2.halation_active = 1;            // spatial branch ON — now cacheable
+            pe2.scanner_unsharp[0] = 1.0f; pe2.scanner_unsharp[1] = 0.5f;
+
+            uint64_t miss0 = spk_test_film_cache_misses(eng);
+            bool bi1 = print_byte_identical(label, &pe2);   // first run: MISS+store
+            uint64_t miss1 = spk_test_film_cache_misses(eng);
+            uint64_t hits0 = spk_test_film_cache_hits(eng);
+            bool bi2 = print_byte_identical(label, &pe2);   // repeat: HIT
+            uint64_t hits1 = spk_test_film_cache_hits(eng);
+            bool memo_ok = (miss1 > miss0) && (hits1 > hits0);
+            std::printf("[%s] misses %llu->%llu then hits %llu->%llu -> %s\n", label,
+                        (unsigned long long)miss0, (unsigned long long)miss1,
+                        (unsigned long long)hits0, (unsigned long long)hits1,
+                        memo_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && bi1 && bi2 && memo_ok;
+        }
+
+        // Scenario A2 (grain bypass): grain is stochastic state — the memo must
+        // NOT be consulted at all (neither counter moves), and the seeded grain
+        // must still be byte-identical warm-vs-cold.
+        {
+            const char* label = "film_cache A2: grain cache-bypass";
             spk_params pw = make_p0();
             spk_image rew{};
             if (spk_simulate(eng, &in_img, &pw, &rew) == SPK_OK && rew.data) spk_image_free(&rew);
@@ -413,18 +449,58 @@ int main(int argc, char** argv) {
             uint64_t miss0 = spk_test_film_cache_misses(eng);
 
             spk_params pe2 = make_p0();
-            pe2.halation_active = 1;            // bypass trigger (spatial branch ON)
-            pe2.scanner_unsharp[0] = 1.0f; pe2.scanner_unsharp[1] = 0.5f;
+            pe2.grain_active = 1;               // stochastic -> bypass
             bool bi = print_byte_identical(label, &pe2);
             uint64_t hits1 = spk_test_film_cache_hits(eng);
             uint64_t miss1 = spk_test_film_cache_misses(eng);
-            // Bypass semantics: cache untouched (no hit AND no miss), byte-identical.
             bool bypass_ok = (hits1 == hits0) && (miss1 == miss0);
             std::printf("[%s] hits %llu->%llu misses %llu->%llu -> %s\n", label,
                         (unsigned long long)hits0, (unsigned long long)hits1,
                         (unsigned long long)miss0, (unsigned long long)miss1,
                         bypass_ok ? "PASS" : "FAIL");
             pass_film_cache = pass_film_cache && bi && bypass_ok;
+        }
+
+        // Scenario D (KEY COMPLETENESS, mandated by the Option-A design): with the
+        // spatial branch warm, every deterministic spatial shape param must MISS
+        // when tweaked (it feeds a spatial kernel, so it MUST be in the key) and
+        // stay byte-identical to a fresh cold engine. A stale-key aliasing bug
+        // here would silently serve the previous shape's negative.
+        {
+            auto make_spatial = [&]() {
+                spk_params q = make_p0();
+                q.halation_active = 1;
+                return q;
+            };
+            struct SpatialEdit { const char* label; void (*apply)(spk_params*); };
+            SpatialEdit edits[] = {
+                {"film_cache D: halation_scatter_amount", [](spk_params* q){ q->halation_scatter_amount = 0.9f; }},
+                {"film_cache D: halation_halation_amount", [](spk_params* q){ q->halation_halation_amount = 1.7f; }},
+                {"film_cache D: dir_diffusion_size_um", [](spk_params* q){ q->dir_diffusion_size_um = 20.0f; }},
+                {"film_cache D: camera_diffusion(+strength)", [](spk_params* q){
+                    q->camera_diffusion_active = 1;
+                    q->camera_diffusion_strength = 0.8f;
+                }},
+                {"film_cache D: lens_blur_um", [](spk_params* q){ q->lens_blur_um = 800.0f; }},
+                {"film_cache D: film_format_mm (pixel size)", [](spk_params* q){ q->film_format_mm = 60.0f; }},
+            };
+            for (const auto& s : edits) {
+                // Warm the slot with the spatial-ON base; the tweak must then MISS.
+                spk_params pw = make_spatial();
+                spk_image rew{};
+                if (spk_simulate(eng, &in_img, &pw, &rew) == SPK_OK && rew.data) spk_image_free(&rew);
+                uint64_t miss0 = spk_test_film_cache_misses(eng);
+
+                spk_params pe2 = make_spatial();
+                s.apply(&pe2);
+                bool bi = print_byte_identical(s.label, &pe2);
+                uint64_t miss1 = spk_test_film_cache_misses(eng);
+                bool miss_ok = (miss1 > miss0);
+                std::printf("[%s cache-miss] misses %llu->%llu -> %s\n", s.label,
+                            (unsigned long long)miss0, (unsigned long long)miss1,
+                            miss_ok ? "PASS" : "FAIL");
+                pass_film_cache = pass_film_cache && bi && miss_ok;
+            }
         }
 
         // Scenario B: FILMING-side edits must MISS (filming recomputed) but still be
@@ -456,6 +532,135 @@ int main(int argc, char** argv) {
                         (unsigned long long)miss0, (unsigned long long)miss1,
                         miss_ok ? "PASS" : "FAIL");
             pass_film_cache = pass_film_cache && bi && miss_ok;
+        }
+
+        // Scenario E (SCAN-ROUTE memo): run_scan_film now has its own film-density
+        // slot (film_memo[kMemoScan]). Assert: cold MISS -> identical repeat HIT;
+        // a downstream-only edit (output space) HITs; a filming edit MISSes; grain
+        // bypasses. Every case byte-identical to a fresh cold engine.
+        {
+            auto make_scan = [&]() {
+                spk_params q = make_p0();
+                q.scan_film = 1;
+                // Unique filming value: the golden sections earlier in this test
+                // already ran the plain scan composition on this warm engine, so
+                // the scan slot may hold it — a distinct EV makes the first run
+                // of THIS scenario a genuine MISS.
+                q.exposure_compensation_ev = 0.31f;
+                return q;
+            };
+            spk_params ps = make_scan();
+
+            uint64_t smiss0 = spk_test_scan_film_cache_misses(eng);
+            bool bi1 = print_byte_identical("film_cache E: scan first (miss)", &ps);
+            uint64_t smiss1 = spk_test_scan_film_cache_misses(eng);
+            uint64_t shit0 = spk_test_scan_film_cache_hits(eng);
+            bool bi2 = print_byte_identical("film_cache E: scan repeat (hit)", &ps);
+            uint64_t shit1 = spk_test_scan_film_cache_hits(eng);
+            bool warm_ok = (smiss1 > smiss0) && (shit1 > shit0);
+            std::printf("[film_cache E: scan miss-then-hit] misses %llu->%llu hits "
+                        "%llu->%llu -> %s\n",
+                        (unsigned long long)smiss0, (unsigned long long)smiss1,
+                        (unsigned long long)shit0, (unsigned long long)shit1,
+                        warm_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && bi1 && bi2 && warm_ok;
+
+            // Downstream-only edit -> HIT (filming reused).
+            spk_params pd = make_scan();
+            pd.output_color_space = SPK_CS_ADOBE_RGB;
+            uint64_t dhit0 = spk_test_scan_film_cache_hits(eng);
+            bool bid = print_byte_identical("film_cache E: scan output-only edit", &pd);
+            uint64_t dhit1 = spk_test_scan_film_cache_hits(eng);
+            bool dhit_ok = (dhit1 > dhit0);
+            std::printf("[film_cache E: scan output-only cache-hit] hits %llu->%llu -> %s\n",
+                        (unsigned long long)dhit0, (unsigned long long)dhit1,
+                        dhit_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && bid && dhit_ok;
+
+            // Filming edit -> MISS.
+            spk_params pf = make_scan();
+            pf.exposure_compensation_ev = 0.7f;
+            uint64_t fmiss0 = spk_test_scan_film_cache_misses(eng);
+            bool bif = print_byte_identical("film_cache E: scan filming edit", &pf);
+            uint64_t fmiss1 = spk_test_scan_film_cache_misses(eng);
+            bool fmiss_ok = (fmiss1 > fmiss0);
+            std::printf("[film_cache E: scan filming cache-miss] misses %llu->%llu -> %s\n",
+                        (unsigned long long)fmiss0, (unsigned long long)fmiss1,
+                        fmiss_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && bif && fmiss_ok;
+
+            // Grain -> bypass (neither scan counter moves).
+            spk_params pg = make_scan();
+            pg.grain_active = 1;
+            uint64_t ghit0 = spk_test_scan_film_cache_hits(eng);
+            uint64_t gmiss0 = spk_test_scan_film_cache_misses(eng);
+            bool big = print_byte_identical("film_cache E: scan grain bypass", &pg);
+            uint64_t ghit1 = spk_test_scan_film_cache_hits(eng);
+            uint64_t gmiss1 = spk_test_scan_film_cache_misses(eng);
+            bool gbypass_ok = (ghit1 == ghit0) && (gmiss1 == gmiss0);
+            std::printf("[film_cache E: scan grain cache-bypass] hits %llu->%llu misses "
+                        "%llu->%llu -> %s\n",
+                        (unsigned long long)ghit0, (unsigned long long)ghit1,
+                        (unsigned long long)gmiss0, (unsigned long long)gmiss1,
+                        gbypass_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && big && gbypass_ok;
+        }
+
+        // Scenario F (PRINT-DENSITY memo): print_expose+print_develop memoize on
+        // the film_density_cmy CONTENT + printing inputs. Assert: output-only
+        // edit HITs (scan() alone reruns); print-side edit MISSes; and — the
+        // content-hash property — grain-on repeats HIT even though the FILM memo
+        // bypasses (seeded grain produces identical film bytes).
+        {
+            auto pd_hits = [&]() { return spk_test_print_density_cache_hits(eng); };
+            auto pd_miss = [&]() { return spk_test_print_density_cache_misses(eng); };
+
+            // Warm the print-density slot with a distinct print base.
+            spk_params pp = make_p0();
+            pp.print_exposure = 1.11f;  // unique: this scenario owns the slot
+            {
+                spk_image w{};
+                if (spk_simulate(eng, &in_img, &pp, &w) == SPK_OK && w.data) spk_image_free(&w);
+            }
+
+            // Output-only edit -> print-density HIT (only scan() reruns).
+            spk_params po = pp;
+            po.output_color_space = SPK_CS_ADOBE_RGB;
+            uint64_t h0 = pd_hits();
+            bool bio = print_byte_identical("print_density F: output-only edit", &po);
+            bool ohit_ok = (pd_hits() > h0);
+            std::printf("[print_density F: output-only cache-hit] hits %llu->%llu -> %s\n",
+                        (unsigned long long)h0, (unsigned long long)pd_hits(),
+                        ohit_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && bio && ohit_ok;
+
+            // Print-side edit -> print-density MISS (film memo still HITs).
+            spk_params py = pp;
+            py.y_filter_shift = 0.07f;
+            uint64_t m0 = pd_miss();
+            bool biy = print_byte_identical("print_density F: y_filter_shift edit", &py);
+            bool ymiss_ok = (pd_miss() > m0);
+            std::printf("[print_density F: print-side cache-miss] misses %llu->%llu -> %s\n",
+                        (unsigned long long)m0, (unsigned long long)pd_miss(),
+                        ymiss_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && biy && ymiss_ok;
+
+            // CONTENT-HASH property: with grain ON the FILM memo bypasses, but the
+            // seeded grain reproduces identical film bytes, so an identical repeat
+            // must HIT the print-density memo.
+            spk_params pg = pp;
+            pg.grain_active = 1;
+            {
+                spk_image w{};
+                if (spk_simulate(eng, &in_img, &pg, &w) == SPK_OK && w.data) spk_image_free(&w);
+            }
+            uint64_t g0 = pd_hits();
+            bool big2 = print_byte_identical("print_density F: grain repeat", &pg);
+            bool ghit_ok = (pd_hits() > g0);
+            std::printf("[print_density F: grain repeat content-hash hit] hits %llu->%llu -> %s\n",
+                        (unsigned long long)g0, (unsigned long long)pd_hits(),
+                        ghit_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && big2 && ghit_ok;
         }
     }
 

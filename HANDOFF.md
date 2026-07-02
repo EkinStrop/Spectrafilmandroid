@@ -1,6 +1,127 @@
 # Spektrafilm Android — Session Handoff
 
-## State (2026-06-24, LATEST, branch `claude/exciting-hamilton-hya62`) — P2 #5 (input gamut compression: radial-to-locus tc_lut bake, OPT-IN / DEFAULT-OFF)
+## State (2026-07-02, LATEST, branch `claude/exciting-hamilton-hya62`) — PM "exact + fast" pass COMPLETE (PR #109)
+
+The PM pass (*"we need spektrafilm exact result with ultra fast speed"*) is **fully landed and
+pushed**: Wave 1 (F1–F7 Kotlin fixes), Wave 2a (E1 spatial decouple, E2 print-route
+spatial+grain), Wave 2b (S1 scan-route film memo, S2 print-density memo), Wave 2c (S4 loop
+parallelization), Wave 3 (S3 Kotlin grade cache), Wave 4 (docs truth-sync). Verification at
+HEAD: host parity suite **33/33 green** (argv replayed from ci.yml, fail=0),
+`SPK_NUM_THREADS` 1≡8 byte-identical on all four `test_parallel` routes, NDK r27
+`externalNativeBuildDebug` green (3 ABIs) after each engine commit.
+
+### Commits (oldest→newest; F/E/S1/S3 from the salvage session, S2/S4/docs from this one)
+- `894cdfc` F1p2+F2+F7 (serialize-on-main IO, DIR-gamma + Glare disclosures), `a4d0649` F3
+  (closed-engine guards), `b7b52fe` F4 (GPU-LUT GL re-arm), `921f9a9` F5 (RawCoilDecoder
+  free), `b2c4c53` F6 (RotationTest)
+- `992e044` **E1** per-effect spatial gates (oracle semantics) + `test_spatial_decouple_e2e`
+- `5f51e40` **E2** print-route filming spatial branch + grain + `test_print_spatial_e2e`
+- `3722dca` **S1** scan-route film-density memo, Option-A spatial key, per-param
+  key-completeness tests (test_simulate_e2e scenarios D/E)
+- `e1b0a2c` **S3** Kotlin retained-result grade cache (grade-only edits: zero native work)
+- `a4b39f7` **S2** print-density memo — print_expose+print_develop keyed on the
+  film_density_cmy CONTENT ⊕ all printing inputs ⊕ the tc_lut-shaping film params
+  (spectral blur, hanatos window/surface, camera UV/IR, input_gamut_compress — the midgray
+  factor reads the tc_lut directly, NOT through the film bytes, so they must not alias).
+  Scenario F gates output-only HIT / print-side MISS / grain-repeat content-hash HIT, all
+  byte-identical-to-cold. Works with grain ON (film memo bypasses, content hash matches).
+- `16f6372` **S4** — DIR-coupler develop loops (pointwise + spatial variant),
+  interpolate_exposure_to_density chunking (covers print_develop + morph), expose bw/log10
+  tails → the deterministic `parallel_for`. grain + recursive blur filters stay serial.
+  scan() was already parallel at both hot loops.
+
+### Measured perf (THIS container: 4 cores, SPK_NUM_THREADS=8, 512×512 deterministic, median)
+| scenario | ms |
+|---|---|
+| cold scan (full pipeline) | **211** (243 pre-S4, −13%) |
+| warm scan repeat / output-only edit | 144–159 (scan-route film memo) |
+| cold print (full pipeline) | ~400 |
+| warm print y-shift (steady) / output-only edit | **153–162** (film + print-density memo → scan() alone) |
+
+Tap decomposition (cold, fresh engine, taps bypass memos): print→film_density 191 ms vs
+scan→film_density 39 ms (the delta ≈ the one-time print digest, cached warm); the print
+stages cost only **~5 ms** at 512² (print_expose already parallel) — so S2's absolute win
+scales with export resolution / enlarger-diffusion / enlarger-LUT paths and grain-ON edits;
+scan() ≈ 150 ms is the dominant warm cost (already parallel — further gains need algorithmic
+work, e.g. the opt-in scanner LUT, not threading). ⚠ Prior handoff bench numbers came from a
+different (likely 2-core) container — never mix boxes when quoting deltas.
+
+### What remains (priorities unchanged)
+- **P2 #6** perceptual output-gamut algos (cam16ucs/oklch/oklrab/jzazbz; XL; one oracle
+  golden per algo; reserved enum slots exist).
+- **Strategy-B rebaseline cluster** (#20-27, now incl. CAT02→CAT16 + the xy-clip removal) —
+  one coordinated baseline bump; trigger NOT fired (upstream WB-norm still churning,
+  checked 2026-07-01).
+- **Device-gated**: R8 0.8.0 release smoke; GPU-LUT re-arm feel (F4); **the E2 default
+  print-route look change** (halation/grain now carry into prints — INTENTIONAL per user
+  directive, but eyeball it on-device); AUDIT §A param-wiring UX decisions.
+- **PR #109 body** still predates this pass — the GitHub MCP connector was unauthenticated
+  in this session, so update the PR body (S2/S4 + bench table above) from a session with
+  GitHub access, or by hand.
+- MALLETT2019: disclosed (GatedBlock); implement-vs-remove decision still open.
+
+### Context notes
+- The two e9e70f8 goldens (`scan_portra_lensblur_nohalation`, `print_portra_spatial`) are
+  now ACCEPTED — the handoff's "regenerate + sha256 or accept on first engine-test green"
+  condition was met by the E1/E2 gates passing (and the full suite re-verified at HEAD twice
+  this session).
+- Oracle runnable in-env: system python3.11 (numpy/scipy/colour/numba/skimage installed, pip
+  no-op), stubs at /tmp/spkstubs, `PYTHONPATH=/home/user/spektrafilm/src:/tmp/spkstubs`;
+  generate goldens ONLY at `c1d0e44` (`git -C /home/user/spektrafilm checkout c1d0e44`);
+  restore the branch after. Oracle repo left on `claude/exciting-hamilton-hya62` (27bd085).
+- Suite replay helper (compile-once archive + all 33 ci.yml argv) used this session:
+  rebuild it from ci.yml if needed — argv there is authoritative.
+- bench_stages.cpp header now documents the post-S1/S2 memo semantics (scenario 5's median
+  is STEADY-STATE: its reps repeat identical params, so only rep 1 pays the pd MISS).
+
+---
+
+## State (2026-06-24, branch `claude/exciting-hamilton-hya62`) — P2 #7 gamut activation + #8/#9 + P3 quick-wins (PR #109)
+
+**Finished the parity-safe near-term backlog** from `docs/PRIORITY_ROADMAP_2026-06-24.md`
+(user-chosen scope: full parity-safe backlog, excluding the deferred Strategy-B rebaseline
+cluster). All on **PR #109** (draft), branch synced with `main`. Every engine change is
+**default-OFF**, so the default render/export path is **byte-identical** to the oracle — the
+host parity suite is **31/31 green**, and `:app:testDebugUnitTest` + `:app:lint` +
+`:app:assembleDebug` (NDK r27, 3 ABIs) are green.
+
+### What shipped (5 commits)
+- **P2 #7 — gamut compression activated end-to-end** (`b658e6d` engine/JNI/facade, `113326c`
+  UI). The dormant output (ACES-RGC, P1 #3) + input (xy-locus, P2 #5) compressors are now
+  user-reachable: `spk_params.output_gamut_compress` / `input_gamut_compress` (int32 ordinals
+  mirroring `model/gamut_compression.h`) set at both `scan()` sites; `input_gamut_compress`
+  folded into the `engine_tc_lut` cache key (only when active) + `compute_film_cache_key`
+  (print-route memo); JNI marshals two new getters via a generic `enum_ordinal_int`;
+  `SpektraParams.IoParams` gains `OutputGamutCompress` {LEGACY_CLIP, OFF, ACES_RGC} /
+  `InputGamutCompress` {OFF, XY}; two dropdowns under Simulation→Output; recipe round-trip
+  (old recipes → default-OFF, unchanged look). **The Reinhard knee stays at the oracle default
+  (0,1,6) — not user-exposed in v1.** No new golden needed (primitives already gated by
+  `test_gamut_out_aces` / `test_gamut_in_xy`).
+- **P2 #8 — IO off the main thread** (`008bf2b`). Diagnostics last-crash read → LaunchedEffect;
+  logcat capture (spawns a process) + report/share + clear → Dispatchers.IO; per-line Regex
+  compiled once. Preset save/delete/list + recipe-reset delete → IO; apply/import read JSON
+  off-main (new `Presets.read`/`readUri`) and decode on main; export off-main.
+- **P2 #9 — undo timing** (`e3c42f3`). Extracted the editor settle decision into a pure,
+  unit-tested `settleDecision()` (EditHistory.kt): an edit landing within the ~500ms restore
+  window now pushes the restored baseline so the undo step isn't lost. +5 EditHistoryTest cases.
+- **P3 quick-wins #10-13,15** (`8d6f1f1`). recipeKey `remember`; ROI/magnifier DisposableEffect
+  cancel; crop `constrainToAspect` pivots on the opposite corner (made `internal` +
+  CropConstrainTest); preset-import `optDouble` safety; Rotation byte-count long-widen + OOM guard.
+
+### NEXT — resume here
+- **Deferred quick-wins**: #14 GPU-LUT re-arm (experimental opt-in, **device-gated**) and #16
+  RawCoilDecoder `freeOffHeap` (dead/unreachable until a Coil host exists).
+- **P2 #6 perceptual output-gamut algos** (cam16ucs/oklch/oklrab/jzazbz) — XL, parity-safe but
+  needs a new oracle golden per algo; reserved enum slots exist. The gamut **knee triple** could
+  also be surfaced in the UI later (currently pinned to the oracle default 0/1/6).
+- **P3-defer Strategy-B rebaseline cluster** (#20-27) — unchanged: one coordinated baseline bump
+  only; trigger = upstream settling its WB-norm baselines.
+- **Device-gated**: R8 0.8.0 release smoke; the four engine param-wiring UX decisions (AUDIT §A).
+- **PR #109** (draft) carries all of the above; session is subscribed for CI/review.
+
+---
+
+## State (2026-06-24, branch `claude/exciting-hamilton-hya62`) — P2 #5 (input gamut compression: radial-to-locus tc_lut bake, OPT-IN / DEFAULT-OFF)
 
 On `claude/exciting-hamilton-hya62` (branch merged up to current `main` first; PR #105 long since
 merged — this ships in a fresh PR). **P2 #5 (input-side gamut compression) is now done**, parity-safe:

@@ -1,0 +1,81 @@
+{
+  "case_id": "scan_portra_lensblur_nohalation",
+  "film_profile": "kodak_portra_400",
+  "generator": "gen_goldens.py",
+  "image": {
+    "input_color_space": "ProPhoto RGB (linear)",
+    "kind": "synthetic_ramp_macbeth",
+    "seed": 20260529,
+    "shape": [
+      64,
+      64,
+      3
+    ],
+    "size": 64
+  },
+  "notes": "scan_film with the camera lens blur ON (camera.lens_blur_um=1650\u00b5m, IDENTICAL to scan_portra_lensblur) but the HALATION/SCATTER kernels zeroed (halation_off=True): only film_render.halation.scatter_core_um / scatter_tail_um / halation_first_sigma_um are forced to (0,0,0) \u2014 the exact three triples the oracle's deactivate_spatial_effects path zeroes (params_builder.py c1d0e44 L73-75) \u2014 while the DIR-coupler spatial diffusion and the lens blur stay ON. deactivate_spatial_effects is False (so the lens blur survives digest); because _apply_halation_preset re-seeds halation_first_sigma_um during digest, the zeroing is applied AFTER digest_params (gen_goldens digests, zeros, then simulates with digest_params_first=False). This DECOUPLES the lens-blur spatial pass from halation: differencing against scan_portra_lensblur (lens blur + halation together) isolates the halation contribution. Grain off -> deterministic/bit-stable. Gates the engine change that lets the lens blur run with halation independently disabled. Tested by tests/test_spatial_decouple_e2e.cpp.",
+  "print_profile": "kodak_portra_endura",
+  "scan_film": true,
+  "spkvec_version": 1,
+  "taps": {
+    "film_density_cmy": {
+      "file": "film_density_cmy.spkvec",
+      "max": 1.4487754106521606,
+      "mean": 0.9320707321166992,
+      "min": 0.09364914894104004,
+      "shape": [
+        64,
+        64,
+        3
+      ]
+    },
+    "film_log_raw": {
+      "file": "film_log_raw.spkvec",
+      "max": 1.0084859132766724,
+      "mean": 0.32746681571006775,
+      "min": -0.9000620245933533,
+      "shape": [
+        64,
+        64,
+        3
+      ]
+    },
+    "final_rgb": {
+      "file": "final_rgb.spkvec",
+      "max": 0.7000780701637268,
+      "mean": 0.24174277484416962,
+      "min": 0.0,
+      "shape": [
+        64,
+        64,
+        3
+      ]
+    }
+  },
+  "toggles": {
+    "auto_exposure": false,
+    "auto_exposure_method": "center_weighted",
+    "deactivate_spatial_effects": false,
+    "deactivate_stochastic_effects": true,
+    "diffusion_active": false,
+    "diffusion_family": "black_pro_mist",
+    "diffusion_halo_warmth": 0.0,
+    "diffusion_spatial_scale": 1.0,
+    "diffusion_strength": 0.5,
+    "exposure_compensation_ev": 0.0,
+    "grain_active": false,
+    "halation_off": true,
+    "lens_blur_um": 1650.0,
+    "normalize_print_exposure": true,
+    "print_exposure_compensation": true,
+    "scanner_black_correction": false,
+    "scanner_black_level": 0.01,
+    "scanner_white_correction": false,
+    "scanner_white_level": 0.98,
+    "spectral_gaussian_blur": 0.0
+  },
+  "tolerance": {
+    "max_abs": 0.0001,
+    "rms": 1e-05
+  }
+}

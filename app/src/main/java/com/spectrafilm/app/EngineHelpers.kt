@@ -512,8 +512,26 @@ fun simResultToBitmapGraded(
     vibrance: Float,
     gamutCompress: Float,
     localAdjustments: List<LocalAdjustment> = emptyList(),
+): Bitmap = gradeBufferToBitmap(res.data, res.width, res.height, res.colorSpace,
+    cctfEncoded, saturation, vibrance, gamutCompress, localAdjustments)
+
+/**
+ * The buffer-level core of [simResultToBitmapGraded]: grade [data] IN PLACE and
+ * convert to a bitmap. Also the re-grade entry point for [GradeCache] hits —
+ * pass a [GradeCache.Pristine.scratchCopy], never the retained master.
+ */
+fun gradeBufferToBitmap(
+    data: java.nio.ByteBuffer,
+    width: Int,
+    height: Int,
+    colorSpace: com.spectrafilm.engine.ColorSpace,
+    cctfEncoded: Boolean,
+    saturation: Float,
+    vibrance: Float,
+    gamutCompress: Float,
+    localAdjustments: List<LocalAdjustment> = emptyList(),
 ): Bitmap {
-    ColorGrade.applyInPlace(res.data, res.width, res.height, res.colorSpace, cctfEncoded, saturation, vibrance, gamutCompress)
-    MaskCompositor.applyInPlace(res.data, res.width, res.height, res.colorSpace, cctfEncoded, localAdjustments)
-    return simResultToBitmap(res.data, res.width, res.height, res.colorSpace)
+    ColorGrade.applyInPlace(data, width, height, colorSpace, cctfEncoded, saturation, vibrance, gamutCompress)
+    MaskCompositor.applyInPlace(data, width, height, colorSpace, cctfEncoded, localAdjustments)
+    return simResultToBitmap(data, width, height, colorSpace)
 }

@@ -38,25 +38,37 @@ const char* kInputF64 =
     "/home/user/Spectrafilmandroid/engine/spektra-core/src/main/cpp/tests/"
     "scan_portra_input_rgb.f64";
 
-// Run spk_simulate with a forced worker count; copy the output into `out`.
+// Run spk_simulate with a forced worker count on a FRESH engine; copy the
+// output into `out`. A fresh engine per run is essential: the engine-level
+// film-density memo would otherwise let the second thread-count run HIT the
+// first run's slot, making the 1-vs-8 comparison of the filming stage vacuous.
 // Returns false on engine error.
-bool simulate_with_threads(spk_engine* eng, const spk_image* in,
+bool simulate_with_threads(const std::string& asset_dir, const spk_image* in,
                            const spk_params* p, int nthreads,
                            std::vector<float>* out) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%d", nthreads);
     setenv("SPK_NUM_THREADS", buf, /*overwrite=*/1);
 
+    spk_engine* eng = nullptr;
+    spk_status st = spk_engine_create(asset_dir.c_str(), &eng);
+    if (st != SPK_OK) {
+        std::fprintf(stderr, "engine create (threads=%d) failed: %s\n", nthreads,
+                     spk_status_str(st));
+        return false;
+    }
     spk_image img{};
-    spk_status st = spk_simulate(eng, in, p, &img);
+    st = spk_simulate(eng, in, p, &img);
     if (st != SPK_OK) {
         std::fprintf(stderr, "spk_simulate (threads=%d) failed: %s\n", nthreads,
                      spk_status_str(st));
+        spk_engine_destroy(eng);
         return false;
     }
     const size_t n = static_cast<size_t>(img.width) * img.height * 3;
     out->assign(img.data, img.data + n);
     spk_image_free(&img);
+    spk_engine_destroy(eng);
     return true;
 }
 
@@ -88,12 +100,6 @@ int main(int argc, char** argv) {
     std::string asset_dir  = argc > 1 ? argv[1] : kAssetDir;
     std::string input_path = argc > 2 ? argv[2] : kInputF64;
 
-    spk_engine* eng = nullptr;
-    spk_status st = spk_engine_create(asset_dir.c_str(), &eng);
-    if (st != SPK_OK) {
-        std::fprintf(stderr, "engine create failed: %s\n", spk_status_str(st));
-        return 2;
-    }
 
     // The fixture is a 64x64x3 float64 image (matches make_test_image(64)).
     const int width = 64, height = 64;
@@ -136,8 +142,8 @@ int main(int argc, char** argv) {
     {
         spk_params p = base;
         p.scan_film = 1;
-        ok &= simulate_with_threads(eng, &in_img, &p, 1, &r1);
-        ok &= simulate_with_threads(eng, &in_img, &p, 8, &r8);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
         ok &= check_identical("scan_film", r1, r8);
     }
 
@@ -145,8 +151,8 @@ int main(int argc, char** argv) {
     {
         spk_params p = base;
         p.scan_film = 0;
-        ok &= simulate_with_threads(eng, &in_img, &p, 1, &r1);
-        ok &= simulate_with_threads(eng, &in_img, &p, 8, &r8);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
         ok &= check_identical("print", r1, r8);
     }
 
@@ -159,12 +165,24 @@ int main(int argc, char** argv) {
         p.scan_film = 1;
         p.grain_active = 1;
         p.halation_active = 1;
-        ok &= simulate_with_threads(eng, &in_img, &p, 1, &r1);
-        ok &= simulate_with_threads(eng, &in_img, &p, 8, &r8);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
         ok &= check_identical("scan_film+grain+halation", r1, r8);
     }
 
-    spk_engine_destroy(eng);
+    // 4) PRINT route with grain + halation ON: the print-route spatial + grain
+    //    filming branch (the negative's halation/scatter/DIR diffusion + AgX
+    //    grain now feed the enlarger). Same thread-invariance contract.
+    {
+        spk_params p = base;
+        p.scan_film = 0;
+        p.grain_active = 1;
+        p.halation_active = 1;
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
+        ok &= check_identical("print+grain+halation", r1, r8);
+    }
+
     std::printf("%s\n", ok ? "ALL PASS" : "FAIL");
     return ok ? 0 : 1;
 }

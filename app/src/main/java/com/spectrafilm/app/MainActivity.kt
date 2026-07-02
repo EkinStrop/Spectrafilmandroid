@@ -70,7 +70,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.spectrafilm.engine.ColorSpace
+import com.spectrafilm.engine.InputGamutCompress
 import com.spectrafilm.engine.LinearImage
+import com.spectrafilm.engine.OutputGamutCompress
 import com.spectrafilm.engine.Rgb2Raw
 import com.spectrafilm.engine.SpektraEngine
 import com.spectrafilm.libraw.DecodeStatus
@@ -278,6 +280,10 @@ class MainActivity : ComponentActivity() {
         // that the same buffer can be re-fed to the engine without a defensive copy. EXPORT and
         // EXPORT does NOT use this cache — it always decodes fresh at EXPORT_MAX_EDGE_PX.
         val sourceCache = remember { DecodedSourceCache() }
+        // Retained-result grade cache: grade-only edits (saturation/vibrance/gamut/
+        // masks) re-grade the last settle render's pristine engine output in pure
+        // Kotlin — zero native work. Keyed by engine params + decode key + edge.
+        val gradeCache = remember { GradeCache() }
         DisposableEffect(Unit) { onDispose { sourceCache.invalidate() } }
 
         // PERF/OOM: a SECOND single-entry cache for the MAX_EDGE_PX whole-image proxy used by the
@@ -392,6 +398,14 @@ class MainActivity : ComponentActivity() {
         // ~screen resolution from a native-pixel crop), overlaid on the scaled proxy.
         var roiOverlay by remember { mutableStateOf<RoiOverlay?>(null) }
         val roiJobRef = remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+        // Cancel any in-flight ROI / magnifier render job when the editor leaves composition
+        // (navigation), so a superseded job doesn't keep rendering into a gone Composable.
+        DisposableEffect(Unit) {
+            onDispose {
+                magnifierJobRef.value?.cancel()
+                roiJobRef.value?.cancel()
+            }
+        }
         // Recycle a superseded ROI bitmap once it has left composition (safe — not mid-draw).
         DisposableEffect(roiOverlay) {
             val current = roiOverlay
@@ -438,7 +452,7 @@ class MainActivity : ComponentActivity() {
         var hasRecipe by remember { mutableStateOf(false) }
         var defaultsJson by remember { mutableStateOf<String?>(null) }
         val snackbarHost = remember { SnackbarHostState() }
-        val recipeKey = Recipes.keyFor(sourceUri)
+        val recipeKey = remember(sourceUri) { Recipes.keyFor(sourceUri) }
 
         // --- double-back-to-exit on the root editor ---
         var backArmed by remember { mutableStateOf(false) }
@@ -622,18 +636,30 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.OpenDocument()
         ) { uri ->
             if (uri != null) {
-                runCatching { Presets.import(ctx, uri, state) }
-                    .onSuccess { status = "preset imported"; previewTick++ }
-                    .onFailure { status = "import failed: ${it.message}" }
+                // Read the SAF stream off-main; decode (Compose-state write) on main.
+                scope.launch {
+                    val text = withContext(Dispatchers.IO) {
+                        runCatching { Presets.readUri(ctx, uri) }.getOrNull()
+                    }
+                    if (text == null) { status = "import failed"; return@launch }
+                    runCatching { Presets.decode(org.json.JSONObject(text), state) }
+                        .onSuccess { status = "preset imported"; previewTick++ }
+                        .onFailure { status = "import failed: ${it.message}" }
+                }
             }
         }
         val presetExporter = rememberLauncherForActivityResult(
             ActivityResultContracts.CreateDocument("application/json")
         ) { uri ->
             if (uri != null) {
-                runCatching { Presets.export(ctx, uri, state) }
-                    .onSuccess { status = "preset exported" }
-                    .onFailure { status = "export failed: ${it.message}" }
+                scope.launch {
+                    // Serialize on main (live Compose-state read); write off-main.
+                    val json = runCatching { Presets.toJsonString(state) }.getOrNull()
+                    if (json == null) { status = "export failed"; return@launch }
+                    val r = withContext(Dispatchers.IO) { runCatching { Presets.exportJson(ctx, uri, json) } }
+                    r.onSuccess { status = "preset exported" }
+                        .onFailure { status = "export failed: ${it.message}" }
+                }
             }
         }
         val lutExporter = rememberLauncherForActivityResult(
@@ -930,6 +956,24 @@ class MainActivity : ComponentActivity() {
             roiOverlay = null  // bitmap recycled by DisposableEffect(roiOverlay)
         }
 
+        // Everything that feeds the NATIVE render for a fit preview at [fullEdge]:
+        // the engine-param snapshot + the decode key. Reads Compose state — call on
+        // the main thread. Grade inputs are deliberately absent (see GradeCache).
+        fun gradeCacheKey(fullEdge: Int): GradeCache.Key {
+            val filmBalance =
+                if (state.balanceToFilmStock && FilmStockBalance.isMeaningful(ctx, state.filmProfile)) state.filmProfile else ""
+            return GradeCache.Key(
+                engineParams = state.toParams(skipGrainHalation = true),
+                decode = GradeCache.DecodeKey(
+                    uri = sourceUri?.toString(), kind = sourceKind.name,
+                    whiteBalance = state.rawWhiteBalance, temperature = state.rawTemperature,
+                    tint = state.rawTint, creativeTemp = state.creativeWbTemp,
+                    creativeTint = state.creativeWbTint, filmBalance = filmBalance,
+                    rotationDegrees = rotation.degrees, maxEdge = fullEdge,
+                ),
+            )
+        }
+
         // Live DRAFT pass — the Lightroom-style render-system "port": on EVERY edit (a slider drag,
         // a preset/dropdown/toggle, a rotation), paint a small fast proxy so the image tracks the
         // change in ~hundreds of ms instead of sitting on the stale frame until the full settle
@@ -945,6 +989,19 @@ class MainActivity : ComponentActivity() {
                 val e = engine ?: return@collect
                 if (cropOverlayOpen || maskOverlayOpen || sampleOverlayOpen || compareMode) return@collect
                 val fullEdge = state.previewMaxSize.coerceAtLeast(256)
+                // Grade-only edit? Re-grade the retained full-quality settle result in
+                // pure Kotlin — zero native work, and it beats a low-res draft on quality.
+                gradeCache.lookup(gradeCacheKey(fullEdge))?.let { pristine ->
+                    runCatching {
+                        withContext(Dispatchers.Default) {
+                            gradeBufferToBitmap(pristine.scratchCopy(), pristine.width,
+                                pristine.height, pristine.colorSpace, state.savingCctfEncoding,
+                                state.saturation, state.vibrance, state.gamutCompress,
+                                state.localAdjustments)
+                        }
+                    }.onSuccess { bmp -> withContext(Dispatchers.Main) { preview = bmp } }
+                    return@collect
+                }
                 val draftEdge = minOf(DRAFT_RENDER_MAX_PX, fullEdge)
                 if (draftEdge >= fullEdge) return@collect       // no meaningful step-down to draft
                 val proxy = sourceCache.get(
@@ -981,23 +1038,41 @@ class MainActivity : ComponentActivity() {
             status = "rendering preview…"
             val renderStart = System.currentTimeMillis()
             val fullEdge = state.previewMaxSize.coerceAtLeast(256)
+            // Key built on MAIN (reads Compose state); the same snapshot renders below,
+            // so the key and the render can never disagree.
+            val cacheKey = gradeCacheKey(fullEdge)
+            val cached = gradeCache.lookup(cacheKey)
+            val prevBefore = beforePreview
             val result = runCatching {
                 withContext(Dispatchers.Default) {
-                    decoding = true
-                    // The live DRAFT effect above already paints a fast low-res proxy during the
-                    // edit, so this settle pass goes straight to the crisp full render (no separate
-                    // coarse pass / extra fresh decode). Cached proxy source — re-decodes only when
-                    // a decode-affecting key (URI/kind/WB/temp/tint/rotation/edge) changed;
-                    // look-param edits reuse it.
-                    val image = loadSourceCachedForPreview(fullEdge)
-                    decoding = false
-                    val before = linearToDisplayBitmap(image)
-                    // Fit preview skips grain/halation (the user's "grain at 100%" choice): they
-                    // are rendered by the zoom ROI, the magnifier and export, never the fit settle.
-                    val after = e.simulatePreview(image, state.toParams(skipGrainHalation = true)).use { res ->
-                        simResultToBitmapGraded(res, state.savingCctfEncoding, state.saturation, state.vibrance, state.gamutCompress, state.localAdjustments)
+                    if (cached != null && prevBefore != null) {
+                        // Grade-only edit (identical engine inputs): re-grade the retained
+                        // pristine engine result — ZERO native work. The ungraded `before`
+                        // is unchanged by construction.
+                        prevBefore to gradeBufferToBitmap(cached.scratchCopy(), cached.width,
+                            cached.height, cached.colorSpace, state.savingCctfEncoding,
+                            state.saturation, state.vibrance, state.gamutCompress,
+                            state.localAdjustments)
+                    } else {
+                        decoding = true
+                        // The live DRAFT effect above already paints a fast low-res proxy during the
+                        // edit, so this settle pass goes straight to the crisp full render (no separate
+                        // coarse pass / extra fresh decode). Cached proxy source — re-decodes only when
+                        // a decode-affecting key (URI/kind/WB/temp/tint/rotation/edge) changed;
+                        // look-param edits reuse it.
+                        val image = loadSourceCachedForPreview(fullEdge)
+                        decoding = false
+                        val before = linearToDisplayBitmap(image)
+                        // Fit preview skips grain/halation (the user's "grain at 100%" choice): they
+                        // are rendered by the zoom ROI, the magnifier and export, never the fit settle.
+                        // Render with cacheKey.engineParams — the exact snapshot the key hashed.
+                        val after = e.simulatePreview(image, cacheKey.engineParams).use { res ->
+                            // Retain the PRISTINE engine output BEFORE the grade mutates res.data.
+                            gradeCache.store(cacheKey, res.data, res.width, res.height, res.colorSpace)
+                            simResultToBitmapGraded(res, state.savingCctfEncoding, state.saturation, state.vibrance, state.gamutCompress, state.localAdjustments)
+                        }
+                        before to after
                     }
-                    before to after
                 }
             }
             decoding = false
@@ -1081,15 +1156,19 @@ class MainActivity : ComponentActivity() {
             // A non-NONE manual rotation is itself an edit worth persisting, even when the
             // params are otherwise default — so only treat as "pristine" if rotation is NONE.
             if (current != null && current == defaultsJson && rotation == SourceRotation.NONE) {
-                if (Recipes.exists(ctx, recipeKey)) {
-                    withContext(Dispatchers.IO) { Recipes.delete(ctx, recipeKey) }
+                // exists() is a file stat — keep it off main with the delete.
+                withContext(Dispatchers.IO) {
+                    if (Recipes.exists(ctx, recipeKey)) Recipes.delete(ctx, recipeKey)
                 }
                 hasRecipe = false
                 return@LaunchedEffect
             }
             runCatching {
+                // Reuse the main-thread serialization from above (torn-snapshot safety);
+                // only the envelope build + file write cross to IO.
+                val paramsJson = current ?: Presets.toJsonString(state)
                 withContext(Dispatchers.IO) {
-                    Recipes.save(ctx, recipeKey, state, sourceName, rotation.degrees)
+                    Recipes.saveJson(ctx, recipeKey, paramsJson, sourceName, rotation.degrees)
                 }
             }.onSuccess { hasRecipe = true }
         }
@@ -1114,18 +1193,14 @@ class MainActivity : ComponentActivity() {
             state.rawWhiteBalance, state.rawTemperature, state.rawTint) {
             if (!recipeReady) return@LaunchedEffect
             delay(500)
+            // settleDecision (unit-tested in EditHistoryTest) handles the subtle case where a
+            // real edit lands within the restore settle window: it pushes the restored baseline
+            // so the edit stays undoable instead of being silently adopted (one-undo-step loss).
             val now = snapshotNow()
-            when {
-                restoring -> {
-                    committedSnapshot = now
-                    restoring = false
-                }
-                committedSnapshot == null -> committedSnapshot = now
-                now != committedSnapshot -> {
-                    editHistory.push(committedSnapshot!!)
-                    committedSnapshot = now
-                }
-            }
+            val action = settleDecision(restoring, committedSnapshot, now)
+            action.push?.let { editHistory.push(it) }
+            committedSnapshot = action.committed
+            restoring = false
         }
 
         // catalog-grouped profile options for the Simulation pickers + Settings.
@@ -1329,21 +1404,48 @@ class MainActivity : ComponentActivity() {
                                 onSelect = { selectedPreset = it },
                                 onSave = {
                                     if (presetName.isNotBlank()) {
-                                        Presets.save(ctx, presetName, state); refreshPresets()
-                                        status = "saved preset '${presetName}'"
+                                        val name = presetName
+                                        // Serialize on main (toJsonString reads live Compose
+                                        // state field-by-field — a torn snapshot off-main);
+                                        // only the file write + listing cross to IO.
+                                        scope.launch {
+                                            val json = Presets.toJsonString(state)
+                                            val names = withContext(Dispatchers.IO) {
+                                                Presets.saveJson(ctx, name, json); Presets.list(ctx)
+                                            }
+                                            presetList = names
+                                            status = "saved preset '$name'"
+                                        }
                                     }
                                 },
                                 onApply = {
                                     if (selectedPreset.isNotBlank()) {
-                                        runCatching { applyWithAmount { Presets.load(ctx, selectedPreset, state) } }
-                                            .onSuccess { status = "applied '${selectedPreset}'"; previewTick++ }
-                                            .onFailure { status = "apply failed: ${it.message}" }
+                                        val name = selectedPreset
+                                        // Read the JSON off-main; decode (Compose-state write)
+                                        // + applyWithAmount run back on the main thread.
+                                        scope.launch {
+                                            val text = withContext(Dispatchers.IO) {
+                                                runCatching { Presets.read(ctx, name) }.getOrNull()
+                                            }
+                                            if (text == null) { status = "apply failed"; return@launch }
+                                            runCatching {
+                                                applyWithAmount { Presets.decode(org.json.JSONObject(text), state) }
+                                            }
+                                                .onSuccess { status = "applied '$name'"; previewTick++ }
+                                                .onFailure { status = "apply failed: ${it.message}" }
+                                        }
                                     }
                                 },
                                 onDelete = {
                                     if (selectedPreset.isNotBlank()) {
-                                        Presets.delete(ctx, selectedPreset); refreshPresets()
-                                        status = "deleted '${selectedPreset}'"; selectedPreset = ""
+                                        val name = selectedPreset
+                                        scope.launch {
+                                            val names = withContext(Dispatchers.IO) {
+                                                Presets.delete(ctx, name); Presets.list(ctx)
+                                            }
+                                            presetList = names
+                                            status = "deleted '$name'"; selectedPreset = ""
+                                        }
                                     }
                                 },
                                 onImport = { presetImporter.launch(arrayOf("application/json", "text/*", "*/*")) },
@@ -1419,16 +1521,18 @@ class MainActivity : ComponentActivity() {
                                     previewTick++
                                 },
                                 onResetEdits = {
-                                    Recipes.delete(ctx, recipeKey)
-                                    Recipes.resetToDefaults(state, settings, profiles)
-                                    presetBaseJson = null; presetFullJson = null; presetAmount = 1f
-                                    hasRecipe = false; rotation = SourceRotation.NONE
-                                    // Reset clears history: the defaults become the new
-                                    // empty-history baseline (you can't undo back across a
-                                    // reset). `restoring` makes the next settle adopt it.
-                                    editHistory.clear(); committedSnapshot = null; restoring = true
-                                    status = "edits reset · recipe cleared"; previewTick++
                                     scope.launch {
+                                        // Recipe file delete off-main; the state resets that
+                                        // follow run back on the main thread.
+                                        withContext(Dispatchers.IO) { Recipes.delete(ctx, recipeKey) }
+                                        Recipes.resetToDefaults(state, settings, profiles)
+                                        presetBaseJson = null; presetFullJson = null; presetAmount = 1f
+                                        hasRecipe = false; rotation = SourceRotation.NONE
+                                        // Reset clears history: the defaults become the new
+                                        // empty-history baseline (you can't undo back across a
+                                        // reset). `restoring` makes the next settle adopt it.
+                                        editHistory.clear(); committedSnapshot = null; restoring = true
+                                        status = "edits reset · recipe cleared"; previewTick++
                                         snackbarHost.currentSnackbarData?.dismiss()
                                         snackbarHost.showSnackbar("Edits reset; saved recipe cleared")
                                     }
@@ -2862,6 +2966,37 @@ class MainActivity : ComponentActivity() {
                 else -> {
                     Dropdown("Output color space", s.outputColorSpace, ColorSpace.entries.toList(),
                         { it.name }, { s.outputColorSpace = it })
+                    // Opt-in gamut compression (default Off => byte-identical to the
+                    // parity oracle). Output: ACES Reference Gamut Compression softens
+                    // out-of-gamut chromaticities toward the achromatic axis in the
+                    // output space. Input: a radial CIE-xy compression toward the visible
+                    // spectral locus, baked into the filming reconstruction LUT, tames
+                    // over-saturated input before the film responds to it.
+                    Dropdown(
+                        "Output gamut compression",
+                        s.outputGamutCompress,
+                        listOf(OutputGamutCompress.LEGACY_CLIP, OutputGamutCompress.ACES_RGC),
+                        {
+                            when (it) {
+                                OutputGamutCompress.LEGACY_CLIP -> "Off"
+                                OutputGamutCompress.OFF -> "Off (no clip)"
+                                OutputGamutCompress.ACES_RGC -> "ACES (tame out-of-gamut)"
+                            }
+                        },
+                        { s.outputGamutCompress = it },
+                    )
+                    Dropdown(
+                        "Input gamut compression",
+                        s.inputGamutCompress,
+                        InputGamutCompress.entries.toList(),
+                        {
+                            when (it) {
+                                InputGamutCompress.OFF -> "Off"
+                                InputGamutCompress.XY -> "Spectral locus (tame saturated input)"
+                            }
+                        },
+                        { s.inputGamutCompress = it },
+                    )
                     // Creative output grade (post-engine Oklab chroma; parity-safe). Negative
                     // Saturation mutes a too-punchy look; Vibrance boosts muted colors while
                     // sparing already-saturated ones.
@@ -3065,18 +3200,20 @@ class MainActivity : ComponentActivity() {
                 tooltip = "Cross-layer (off-diagonal) inhibition — how much each dye layer bleeds into the others.", default = PARAM_DEFAULTS.couplersInhibitionInterlayer)
             AdvancedToggle(advanced) { advanced = it }
             if (advanced) {
-                TripleSlider("Within-layer curve (R, G, B)", s.couplersGammaSamelayer, 0f..2f, { s.couplersGammaSamelayer = it },
-                    step = 0.02f, decimals = 3, tooltip = "Per-channel same-layer DIR gamma (R, G, B).",
-                    default = PARAM_DEFAULTS.couplersGammaSamelayer)
-                PairSlider("Color mix R→G/B", s.couplersGammaRtoGb, 0f..2f, { s.couplersGammaRtoGb = it },
-                    step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from R onto G and B.",
-                    componentLabels = "→G" to "→B", default = PARAM_DEFAULTS.couplersGammaRtoGb)
-                PairSlider("Color mix G→R/B", s.couplersGammaGtoRb, 0f..2f, { s.couplersGammaGtoRb = it },
-                    step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from G onto R and B.",
-                    componentLabels = "→R" to "→B", default = PARAM_DEFAULTS.couplersGammaGtoRb)
-                PairSlider("Color mix B→R/G", s.couplersGammaBtoRg, 0f..2f, { s.couplersGammaBtoRg = it },
-                    step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from B onto R and G.",
-                    componentLabels = "→R" to "→G", default = PARAM_DEFAULTS.couplersGammaBtoRg)
+                GatedBlock("The DIR gamma matrix is set per film stock by the engine (each stock overwrites these) — adjusting them has no effect.") {
+                    TripleSlider("Within-layer curve (R, G, B)", s.couplersGammaSamelayer, 0f..2f, { s.couplersGammaSamelayer = it },
+                        step = 0.02f, decimals = 3, tooltip = "Per-channel same-layer DIR gamma (R, G, B).",
+                        default = PARAM_DEFAULTS.couplersGammaSamelayer)
+                    PairSlider("Color mix R→G/B", s.couplersGammaRtoGb, 0f..2f, { s.couplersGammaRtoGb = it },
+                        step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from R onto G and B.",
+                        componentLabels = "→G" to "→B", default = PARAM_DEFAULTS.couplersGammaRtoGb)
+                    PairSlider("Color mix G→R/B", s.couplersGammaGtoRb, 0f..2f, { s.couplersGammaGtoRb = it },
+                        step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from G onto R and B.",
+                        componentLabels = "→R" to "→B", default = PARAM_DEFAULTS.couplersGammaGtoRb)
+                    PairSlider("Color mix B→R/G", s.couplersGammaBtoRg, 0f..2f, { s.couplersGammaBtoRg = it },
+                        step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from B onto R and G.",
+                        componentLabels = "→R" to "→G", default = PARAM_DEFAULTS.couplersGammaBtoRg)
+                }
                 EnhancedSlider("Color bleed radius (µm)", s.couplersDiffusionSizeUm, 0f..100f, { s.couplersDiffusionSizeUm = it },
                     step = 5f, decimals = 1, tooltip = "Sigma in µm for the diffusion of the couplers (5-20 µm).", default = PARAM_DEFAULTS.couplersDiffusionSizeUm)
                 EnhancedSlider("Color bleed tail (µm)", s.couplersDiffusionTailUm, 0f..500f, { s.couplersDiffusionTailUm = it },
@@ -3093,6 +3230,12 @@ class MainActivity : ComponentActivity() {
         var expanded by remember { mutableStateOf(true) }
         SectionCard("Glare", expanded, { expanded = it }, enabledSwitch = s.glareActive,
             onEnabledChange = { s.glareActive = it }, help = ParamHelpText.forKey(ParamHelpText.GLARE)) {
+            // Live control, but only on one route — say so instead of dimming.
+            Text(
+                "Glare applies on the print route only (no effect in Slide mode / scan-film).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             EnhancedSlider("Percent", s.glarePercent, 0f..1f, { s.glarePercent = it },
                 step = 0.01f, decimals = 2, tooltip = "Percentage of the glare light (typically 0.1-0.25)", default = PARAM_DEFAULTS.glarePercent)
             EnhancedSlider("Roughness", s.glareRoughness, 0f..1f, { s.glareRoughness = it },

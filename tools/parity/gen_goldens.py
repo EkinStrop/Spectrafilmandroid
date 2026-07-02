@@ -201,6 +201,19 @@ class Case:
     boost_ev: float = 0.0
     boost_range: float = 0.3
     protect_ev: float = 4.0
+    # Halation-only kill switch. When True, ONLY the three halation-object spatial
+    # sigmas that the oracle's deactivate_spatial_effects path zeroes
+    # (params_builder.py c1d0e44 L73-75: film_render.halation.scatter_core_um /
+    # scatter_tail_um / halation_first_sigma_um) are set to (0,0,0), WHILE every other
+    # spatial effect (camera.lens_blur_um, DIR-coupler diffusion_size_um) is left
+    # active. It decouples the halation/scatter kernels from the rest of the spatial
+    # branch, so a case can keep deactivate_spatial_effects=False (lens blur alive) yet
+    # produce NO halation. The zeroing MUST happen AFTER digest_params:
+    # _apply_halation_preset re-seeds halation_first_sigma_um from the profile preset
+    # during digest (params_builder.py L198), so gen_goldens digests, zeroes these
+    # three, then simulates with digest_params_first=False (see _run_tap). Grain/glare
+    # stay off so the case is still deterministic/bit-stable.
+    halation_off: bool = False
     notes: str = ""
     taps: tuple = field(default=tuple(TAPS.keys()))
 
@@ -633,6 +646,56 @@ CASES = [
               "film taps (film_log_raw/film_density_cmy) and final_rgb. Tested by "
               "tests/test_highlight_boost_e2e.cpp.",
     ),
+    Case(
+        case_id="scan_portra_lensblur_nohalation",
+        film_profile="kodak_portra_400",
+        print_profile="kodak_portra_endura",
+        scan_film=True,
+        deactivate_spatial_effects=False,   # required: keeps camera.lens_blur_um alive
+        deactivate_stochastic_effects=True,  # grain OFF -> deterministic/bit-stable
+        grain_active=False,
+        lens_blur_um=1650.0,                # SAME non-default lens blur as scan_portra_lensblur
+        halation_off=True,                  # zero ONLY the halation/scatter sigmas
+        notes="scan_film with the camera lens blur ON (camera.lens_blur_um=1650µm, "
+              "IDENTICAL to scan_portra_lensblur) but the HALATION/SCATTER kernels "
+              "zeroed (halation_off=True): only film_render.halation.scatter_core_um / "
+              "scatter_tail_um / halation_first_sigma_um are forced to (0,0,0) — the "
+              "exact three triples the oracle's deactivate_spatial_effects path zeroes "
+              "(params_builder.py c1d0e44 L73-75) — while the DIR-coupler spatial "
+              "diffusion and the lens blur stay ON. deactivate_spatial_effects is False "
+              "(so the lens blur survives digest); because _apply_halation_preset "
+              "re-seeds halation_first_sigma_um during digest, the zeroing is applied "
+              "AFTER digest_params (gen_goldens digests, zeros, then simulates with "
+              "digest_params_first=False). This DECOUPLES the lens-blur spatial pass "
+              "from halation: differencing against scan_portra_lensblur (lens blur + "
+              "halation together) isolates the halation contribution. Grain off -> "
+              "deterministic/bit-stable. Gates the engine change that lets the lens "
+              "blur run with halation independently disabled. Tested by "
+              "tests/test_spatial_decouple_e2e.cpp.",
+    ),
+    Case(
+        case_id="print_portra_spatial",
+        film_profile="kodak_portra_400",
+        print_profile="kodak_portra_endura",
+        scan_film=False,                    # PRINT route (negative->enlarger->print->scan)
+        deactivate_spatial_effects=False,   # spatial branch ON: in-emulsion scatter +
+                                            # back-reflection halation + DIR-coupler diffusion
+        deactivate_stochastic_effects=True,  # grain + print glare OFF -> deterministic
+        grain_active=False,
+        notes="PRINT route with the SPATIAL EFFECTS ON "
+              "(deactivate_spatial_effects=False: in-emulsion scatter + back-reflection "
+              "halation in FilmingStage.expose, DIR-coupler spatial diffusion in "
+              "develop) but grain + print glare OFF (deactivate_stochastic_effects="
+              "True, grain_active=False), same profile/filters as print_portra. The "
+              "scan_portra_spatial golden only covers the spatial branch on the "
+              "scan_film route; this pins the SAME spatial branch feeding the PRINT "
+              "stage — the spatial halation/scatter carried in film_density_cmy flows "
+              "through printing into print_density_cmy + final_rgb. Deterministic/"
+              "bit-stable (only grain/glare are stochastic; the halation/scatter/"
+              "coupler-diffusion kernels are deterministic convolutions). Gates the "
+              "print-route spatial-branch parity. Tested by "
+              "tests/test_print_spatial_e2e.cpp.",
+    ),
 ]
 
 
@@ -778,7 +841,7 @@ def _build_params(sf, case: Case):
     return params
 
 
-def _run_tap(sf, params, tap_name: str, image):
+def _run_tap(sf, params, tap_name: str, image, halation_off: bool = False):
     """Run simulate once configured for ``tap_name`` and return the buffer."""
     import copy
 
@@ -796,7 +859,21 @@ def _run_tap(sf, params, tap_name: str, image):
         p.debug.output_film_density_cmy = False
         p.debug.output_print_density_cmy = False
         setattr(p.debug, field, True)
-    out = sf.simulate(image, p)  # digests params internally
+    if halation_off:
+        # Zero ONLY the three halation-object spatial sigmas (see Case.halation_off).
+        # This MUST run AFTER digest_params: _apply_halation_preset re-seeds
+        # halation_first_sigma_um from the profile preset during digest, so we digest
+        # explicitly, zero the three triples, then simulate WITHOUT re-digesting. Every
+        # other spatial effect (camera.lens_blur_um, DIR-coupler diffusion_size_um) is
+        # preserved, decoupling the halation/scatter kernels from the rest of the
+        # spatial branch.
+        p = sf.digest_params(p)
+        p.film_render.halation.scatter_core_um = (0.0, 0.0, 0.0)
+        p.film_render.halation.scatter_tail_um = (0.0, 0.0, 0.0)
+        p.film_render.halation.halation_first_sigma_um = (0.0, 0.0, 0.0)
+        out = sf.simulate(image, p, digest_params_first=False)
+    else:
+        out = sf.simulate(image, p)  # digests params internally
     import numpy as np
 
     return np.ascontiguousarray(np.asarray(out, dtype=np.float32))
@@ -816,7 +893,7 @@ def generate_case(sf, case: Case, size: int) -> dict:
     for tap_name in case.taps:
         if case.scan_film and tap_name in SCAN_FILM_SKIP_TAPS:
             continue
-        buf = _run_tap(sf, params, tap_name, image)
+        buf = _run_tap(sf, params, tap_name, image, halation_off=case.halation_off)
         path = case_dir / f"{tap_name}.spkvec"
         spkvec.write(path, buf)
         written[tap_name] = {
@@ -849,6 +926,7 @@ def generate_case(sf, case: Case, size: int) -> dict:
             "grain_active": case.grain_active,
             "deactivate_stochastic_effects": case.deactivate_stochastic_effects,
             "deactivate_spatial_effects": case.deactivate_spatial_effects,
+            "halation_off": case.halation_off,
             "lens_blur_um": case.lens_blur_um,
             "diffusion_active": case.diffusion_active,
             "diffusion_family": case.diffusion_family,

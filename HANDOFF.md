@@ -1,111 +1,78 @@
 # Spektrafilm Android — Session Handoff
 
-## State (2026-07-02, LATEST, branch `claude/exciting-hamilton-hya62`) — PM "fix everything" pass: Wave 1 salvaged, Waves 2-4 PENDING (PR #109)
+## State (2026-07-02, LATEST, branch `claude/exciting-hamilton-hya62`) — PM "exact + fast" pass COMPLETE (PR #109)
 
-**User directive for this pass:** *"act as project manager, create teams and fix everything; we
-need spektrafilm exact result with ultra fast speed"* — plus: run all agents ultra-terse /
-low-context (caveman style, github.com/juliusbrussee/caveman absorbed, not vendored), and
-**cap subagent scope** (⚠ this session's three parallel wave-1 agents all died on a session
-token limit mid-run; work was salvaged from the tree — give each agent ONE small item next time).
+The PM pass (*"we need spektrafilm exact result with ultra fast speed"*) is **fully landed and
+pushed**: Wave 1 (F1–F7 Kotlin fixes), Wave 2a (E1 spatial decouple, E2 print-route
+spatial+grain), Wave 2b (S1 scan-route film memo, S2 print-density memo), Wave 2c (S4 loop
+parallelization), Wave 3 (S3 Kotlin grade cache), Wave 4 (docs truth-sync). Verification at
+HEAD: host parity suite **33/33 green** (argv replayed from ci.yml, fail=0),
+`SPK_NUM_THREADS` 1≡8 byte-identical on all four `test_parallel` routes, NDK r27
+`externalNativeBuildDebug` green (3 ABIs) after each engine commit.
 
-### What landed this session (3 commits)
-- `e9e70f8` **two new oracle goldens @ pinned `c1d0e44`** (inert data until their tests land):
-  `scan_portra_lensblur_nohalation` (spatial ON, lens blur ON, halation sigmas zeroed via new
-  `halation_off` Case field in `gen_goldens.py`) and `print_portra_spatial` (print route,
-  `deactivate_spatial_effects=False`, grain off). ⚠ Determinism re-run NOT confirmed (agent died
-  first) — regenerate + `sha256sum` compare before trusting, or accept on first engine-test green.
-  Oracle repo `/home/user/spektrafilm` restored to branch `claude/exciting-hamilton-hya62` (27bd085).
-- `4e84a80` **host bench harness** `engine/.../cpp/tests/bench_stages.cpp` (local-only, NOT in
-  ci.yml; compile cmd in header). **Baseline @ c7e373f, 8 threads, 512×512:** cold scan 232ms /
-  warm scan repeat 173ms (NO memo — hits 0) / warm scan output-only 180ms / cold print 396ms /
-  warm print y-shift 304ms (film memo HIT) / warm print output-only 304ms. Only the 8-thread pass
-  was run (no 1-thread baseline yet).
-- `248a738` **Presets.kt part 1**: `saveJson(ctx,name,json)` string-write helper;
-  `:app:testDebugUnitTest` green. Part 2 (call sites) pending — see F1.
+### Commits (oldest→newest; F/E/S1/S3 from the salvage session, S2/S4/docs from this one)
+- `894cdfc` F1p2+F2+F7 (serialize-on-main IO, DIR-gamma + Glare disclosures), `a4d0649` F3
+  (closed-engine guards), `b7b52fe` F4 (GPU-LUT GL re-arm), `921f9a9` F5 (RawCoilDecoder
+  free), `b2c4c53` F6 (RotationTest)
+- `992e044` **E1** per-effect spatial gates (oracle semantics) + `test_spatial_decouple_e2e`
+- `5f51e40` **E2** print-route filming spatial branch + grain + `test_print_spatial_e2e`
+- `3722dca` **S1** scan-route film-density memo, Option-A spatial key, per-param
+  key-completeness tests (test_simulate_e2e scenarios D/E)
+- `e1b0a2c` **S3** Kotlin retained-result grade cache (grade-only edits: zero native work)
+- `a4b39f7` **S2** print-density memo — print_expose+print_develop keyed on the
+  film_density_cmy CONTENT ⊕ all printing inputs ⊕ the tc_lut-shaping film params
+  (spectral blur, hanatos window/surface, camera UV/IR, input_gamut_compress — the midgray
+  factor reads the tc_lut directly, NOT through the film bytes, so they must not alias).
+  Scenario F gates output-only HIT / print-side MISS / grain-repeat content-hash HIT, all
+  byte-identical-to-cold. Works with grain ON (film memo bypasses, content hash matches).
+- `16f6372` **S4** — DIR-coupler develop loops (pointwise + spatial variant),
+  interpolate_exposure_to_density chunking (covers print_develop + morph), expose bw/log10
+  tails → the deterministic `parallel_for`. grain + recursive blur filters stay serial.
+  scan() was already parallel at both hot loops.
 
-### REMAINING PLAN (execute in order; every engine step: full parity suite green, byte-identical
-defaults, `SPK_NUM_THREADS` 1≡8, then commit+push immediately)
+### Measured perf (THIS container: 4 cores, SPK_NUM_THREADS=8, 512×512 deterministic, median)
+| scenario | ms |
+|---|---|
+| cold scan (full pipeline) | **211** (243 pre-S4, −13%) |
+| warm scan repeat / output-only edit | 144–159 (scan-route film memo) |
+| cold print (full pipeline) | ~400 |
+| warm print y-shift (steady) / output-only edit | **153–162** (film + print-density memo → scan() alone) |
 
-**Wave 1a remainder — Team FIX (Kotlin, parity-free):**
-- **F1 part 2** torn snapshot: serialize `Presets.toJsonString(state)` on MAIN, pass String into
-  `withContext(IO)` at 3 sites: preset save `MainActivity.kt~:1351`, recipe auto-save `~:1110`
-  (needs a `Recipes.saveJson`-style split — `Recipes.save` calls `Presets.encode(state)` inside IO),
-  preset export `~:652` (needs `Presets.exportJson`). Precedent: undo path `~:432/:1099`.
-- **F2** `Recipes.exists` on Main `MainActivity.kt~:1103` → fold into adjacent IO block.
-- **F3** `SpektraEngine.kt~:130-156`: add `check(!destroyed)` atop simulate/simulatePreview/bakeCubeLut.
-- **F4** `LutGpuPreview.kt`: store `lastProxy/lastLut` in `submit()` (~:139); in `onSurfaceCreated`
-  (~:144-156) reset `haveProxy/haveLut=false` + re-arm `pending*` from `last*` (black-preview fix).
-- **F5** `RawCoilDecoder.kt~:57-63`: `try { toDisplayBitmap() } finally { RawDecoder.freeOffHeap(linear.data) }`.
-- **F6** new `app/src/test/.../RotationTest.kt`: `rotated()` 90/180/270 + `flippedHorizontal()` on
-  tiny allocateDirect LinearImage + `SourceRotation.next/then/fromDegrees`. Skip ExifInterface + >2GB guard.
-- **F7** disclosures: DIR-gamma sliders `MainActivity.kt~:3141-3152` → GatedBlock "set per film
-  stock by the engine — no effect"; film Glare `~:3165-3175` → inline note "applies on the print
-  route only" (do NOT dim — live on print route). Pattern: `Widgets.kt~:721` GatedBlock, exemplars
-  `:2617/:2858`. Gates: `:app:testDebugUnitTest` + `:app:lint`.
+Tap decomposition (cold, fresh engine, taps bypass memos): print→film_density 191 ms vs
+scan→film_density 39 ms (the delta ≈ the one-time print digest, cached warm); the print
+stages cost only **~5 ms** at 512² (print_expose already parallel) — so S2's absolute win
+scales with export resolution / enlarger-diffusion / enlarger-LUT paths and grain-ON edits;
+scan() ≈ 150 ms is the dominant warm cost (already parallel — further gains need algorithmic
+work, e.g. the opt-in scanner LUT, not threading). ⚠ Prior handoff bench numbers came from a
+different (likely 2-core) container — never mix boxes when quoting deltas.
 
-**Wave 2a — Team EXACT (engine; goldens already committed):**
-- **E1 decouple spatial**: `spektra.cpp:691` master bool gates lens-blur(:715), camera
-  diffusion(:709), DIR diffusion(:703), halation(:730-737), scanner blur/unsharp(:812) — give each
-  its own param-keyed gate (oracle semantics: oracle zeroes per-effect fields under
-  `deactivate_spatial_effects`, params_builder.py:110-123, and otherwise gates each on its own
-  params). No existing golden moves. New host test gates `scan_portra_lensblur_nohalation` +
-  ci.yml argv (mirror `test_lensblur`; SPK 1v8 + on-vs-off asserts).
-- **E2 print-route spatial/grain**: `spektra.cpp:1073-1101` hard-forces filming spatial off +
-  never grains; feed existing `print_spatial`(:1005)/`print_stochastic`(:1009) into the filming
-  digest + `apply_user_dir_couplers` + add the grain pass. Gate: `print_portra_spatial` golden +
-  ci.yml. Grain half: LOCAL statistical check only (no CI golden — RNG streams differ Python↔C++).
-  ⚠ E2 changes default print-route ROI/export look (halation defaults ON) — INTENTIONAL per user
-  directive; fit preview unaffected (`skipGrainHalation=true`, MainActivity ~:980/:1016).
-  Film-memo bypass `:1120` (spatial_or_stochastic) means default print stops memoizing → S1 key
-  decision below. The two host-test DRAFTS were lost with the dead agent — write fresh.
-
-**Wave 2b — Team SPEED memos (engine):**
-- **S1 scan_film film-density memo**: `run_scan_film` recomputes expose+develop every call
-  (:791-798); replicate the print-route single-slot memo (`compute_film_cache_key` :410-480, memo
-  :1099-1158) with a per-route slot. Key = **Option A**: fold the full deterministic spatial set
-  (~16 `apply_user_halation` fields :509-529, DIR diffusion trio :497-501, 9 camera-diffusion
-  fields :566-575, `resize_pixel_size_um`) so spatial-on memoizes too; bypass stays for grain +
-  debug taps. **Mandatory key-completeness test**: per spatial param, warm→tweak→assert MISS +
-  byte-identical-to-cold (extend `test_simulate_e2e.cpp:330-349` + warm==cold :272-295).
-- **S2 print-density memo**: print_expose+print_develop rerun on output-only edits (:1160-1167).
-  Key = FNV over the `film_density_cmy` buffer CONTENT ⊕ dims ⊕ profile ids ⊕ all printing inputs
-  (neutral-CC, y/m shifts, print exposure/comp/normalize, exposure_comp_ev, print gamma, preflash,
-  morph, enlarger-diffusion+pixel_size when active, enlarger-LUT settings, bw-correction) ⊕ taps.
-  Content-hash makes S2 independent of S1 key completeness. Target: output-only edits rerun
-  scan() only. Bench after each (`bench_stages.cpp`); expect scenarios 2/3/6 to collapse.
-
-**Wave 2c — S4 parallelize (bench-driven, last):** `develop()`'s
-`interpolate_exposure_to_density` (`density_curves.cpp:102`), `print_develop()`
-(`printing.cpp:352-383`), `expose()` log10/bw tails (`filming.cpp:499-508`) via the existing
-deterministic `parallel_for` (per-pixel independent, no reductions — verified). Spatial conv
-kernels only if bench-hot (rows/cols only — recursive filters). grain.cpp STAYS serial.
-`test_parallel` 1≡8 after each.
-
-**Wave 3 — S3 Kotlin retained-result grade cache:** ⚠ `simResultToBitmapGraded` MUTATES res.data
-in place (`EngineHelpers.kt:516-517`) → the cache must copy a PRISTINE ungraded buffer inside
-`.use{}` and re-grade a scratch copy per edit. Key = `toParams(skipGrainHalation=true)` value
-(data class, structural eq, no array fields) + decode-key tuple (MainActivity ~:969-975) +
-fullEdge. Single @Volatile slot (6.6-25 MB), cleared on source change/dispose; settle coroutine
-sole writer, readers `duplicate()`. Grade-only edits (saturation/vibrance/gamutCompress/
-localAdjustments — all post-engine Kotlin) → zero native work; also short-circuit the draft pass
-on hit.
-
-**Wave 4 — DOCS truth-sync + wrap:** `docs/ROADMAP.md` ~4 stale body lines (enlarger-LUT ×4,
-AAssetManager, debug-signed); `docs/AUDIT.md` — MALLETT2019 (:113-116) → "disclosed (GatedBlock
-:2617); impl still open", dead-controls (:139-144) → record disclosures, ADD missing gamut
-entries; `CHANGELOG.md` Unreleased — add gamut compression, np-interp+half (PR#105),
-P2#8/#9+quick-wins (PR#109) + this pass; `docs/PRIORITY_ROADMAP_2026-06-24.md` — mark
-#5,7,8,9,10-13,15 ✅; **CLAUDE.md + spectrafilm-dev skill: parity gate count is 31 today (docs
-say 26/15), →33 after E1/E2 tests land**; HANDOFF refresh; PR #109 body + bench table.
+### What remains (priorities unchanged)
+- **P2 #6** perceptual output-gamut algos (cam16ucs/oklch/oklrab/jzazbz; XL; one oracle
+  golden per algo; reserved enum slots exist).
+- **Strategy-B rebaseline cluster** (#20-27, now incl. CAT02→CAT16 + the xy-clip removal) —
+  one coordinated baseline bump; trigger NOT fired (upstream WB-norm still churning,
+  checked 2026-07-01).
+- **Device-gated**: R8 0.8.0 release smoke; GPU-LUT re-arm feel (F4); **the E2 default
+  print-route look change** (halation/grain now carry into prints — INTENTIONAL per user
+  directive, but eyeball it on-device); AUDIT §A param-wiring UX decisions.
+- **PR #109 body** still predates this pass — the GitHub MCP connector was unauthenticated
+  in this session, so update the PR body (S2/S4 + bench table above) from a session with
+  GitHub access, or by hand.
+- MALLETT2019: disclosed (GatedBlock); implement-vs-remove decision still open.
 
 ### Context notes
-- MALLETT2019: keep disclosed as-is (user no-preference; GatedBlock already shipped :2617).
-- Upstream rebaseline (Strategy-B): trigger NOT fired — WB-norm commits live only on
-  `reflectance-upsampling-methods`, unmerged and still churning (checked 2026-07-01). Stay deferred.
+- The two e9e70f8 goldens (`scan_portra_lensblur_nohalation`, `print_portra_spatial`) are
+  now ACCEPTED — the handoff's "regenerate + sha256 or accept on first engine-test green"
+  condition was met by the E1/E2 gates passing (and the full suite re-verified at HEAD twice
+  this session).
 - Oracle runnable in-env: system python3.11 (numpy/scipy/colour/numba/skimage installed, pip
-  no-op), stubs at /tmp/spkstubs, `PYTHONPATH=/home/user/spektrafilm/src:/tmp/spkstubs`; generate
-  goldens ONLY at `c1d0e44` (`git -C /home/user/spektrafilm checkout c1d0e44`); restore the branch
-  after.
+  no-op), stubs at /tmp/spkstubs, `PYTHONPATH=/home/user/spektrafilm/src:/tmp/spkstubs`;
+  generate goldens ONLY at `c1d0e44` (`git -C /home/user/spektrafilm checkout c1d0e44`);
+  restore the branch after. Oracle repo left on `claude/exciting-hamilton-hya62` (27bd085).
+- Suite replay helper (compile-once archive + all 33 ci.yml argv) used this session:
+  rebuild it from ci.yml if needed — argv there is authoritative.
+- bench_stages.cpp header now documents the post-S1/S2 memo semantics (scenario 5's median
+  is STEADY-STATE: its reps repeat identical params, so only rep 1 pays the pd MISS).
 
 ---
 

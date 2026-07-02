@@ -1,15 +1,34 @@
 # Changelog
 
-## Unreleased — codebase review + top-priority parity fixes 🔍
+## Unreleased — parity fixes, gamut compression, spatial decoupling + the speed pass 🔍⚡
 
-A codebase-wide review (`docs/CODE_REVIEW_2026-06-24.md`, find→adversarially-verify→synthesize)
-and its top-priority fixes, plus an upstream-sync plan (`docs/UPSTREAM_SYNC_2026-06-24.md`) and its
-first opt-in feature port. All engine-parity gates stay green (no golden feeds a RAW buffer); the
-default render/export path is byte-identical except for two corrections that bring previously
-diverging default paths back onto the oracle: the auto-exposure metering fix and the RAW
-input-colorspace fix below.
+A codebase-wide review (`docs/CODE_REVIEW_2026-06-24.md`) and its top-priority fixes, the
+upstream-sync opt-in ports (PR #105), the gamut-compression activation + Kotlin hardening
+backlog (PR #109), and the "exact + fast" pass (2026-07-02): per-effect spatial decoupling,
+the print-route spatial/grain enable, and engine memoization. The host parity suite grew
+26 → **33 gates**, all green; every default engine path stays byte-identical to the oracle
+except the corrections/enables explicitly listed below.
 
 ### Added
+- **Spatial-effect decoupling (parity fix).** Every spatial effect (DIR-coupler diffusion,
+  camera diffusion filter, camera lens blur, halation/scatter, scanner blur/unsharp) now gates
+  on its OWN params (zero = inert), matching the oracle's per-effect self-gating;
+  `halation_active` gates only halation/scatter (its UI meaning). Previously one master toggle
+  silently killed them all. New gate `test_spatial_decouple_e2e`
+  (golden `scan_portra_lensblur_nohalation`, oracle c1d0e44).
+- **Print-route film spatial + grain (parity fix; INTENTIONAL look change).** The print route
+  now runs the same per-effect-gated filming as the scan route — halation/scatter, DIR spatial
+  diffusion, camera diffusion, lens blur, and AgX grain all carry into the print, matching the
+  oracle's single FilmingStage (pre-fix divergence ~1.8e-2). New gate `test_print_spatial_e2e`
+  (golden `print_portra_spatial`); grain half verified statistically vs the oracle
+  (mean_abs 1.468e-2 both). Default prints in the app now show film character (halation
+  defaults on); the fit preview is unaffected.
+- **Gamut compression, end-to-end (opt-in / default-OFF).** Output: ACES RGC v1.3; input:
+  radial-to-locus xy compression baked into the filming tc_lut. Both wired
+  engine → JNI → facade → two dropdowns under Simulation → Output, round-tripping in recipes
+  (old recipes → OFF, unchanged look). Gates `test_gamut_out_aces` / `test_gamut_in_xy`.
+- **Highlight boost trio** (`boost_ev`/`boost_range`/`protect_ev`) ported into `expose`
+  (pre-clip highlight reconstruction; gate `test_highlight_boost_e2e`).
 - **Print density-curve morph (s023), opt-in / default-OFF.** First feature from the upstream-sync
   plan. Ports `utils/morph_curves.py::apply_print_curves_morph`: when enabled, the print *develop*
   step rebuilds the paper's density table from its parametric `density_curves_model` and morphs it
@@ -49,12 +68,55 @@ input-colorspace fix below.
   dereferencing, matching `spk_simulate_preview` / `spk_simulate_tap`.
 - **`grain.cpp` dead store removed** (`dmax_frac` was written but never read; `frac` is used
   inline). No behavioural change.
+- **np.interp port for the non-monotonic DIR-coupler axis** (`np_interp_array` reproduces
+  numpy's order-dependent bracket choice; gate `test_np_interp`, bit-exact over 82 cases).
+- **float→half now true round-to-nearest-even** (normal + subnormal, full sticky;
+  bit-identical to numpy float16 over 33k inputs).
+- **Kotlin/UI robustness batch**: preset/recipe/diagnostics IO off the main thread with
+  serialize-on-main (no torn Compose-state snapshots); undo step no longer lost when an edit
+  lands in the restore window; recipeKey `remember`; ROI/magnifier dispose-cancel; crop
+  constrain anchors the opposite corner; preset-import `optDouble` safety; rotation-buffer
+  overflow guard (+`RotationTest`); GPU LUT preview re-arms after GL context loss;
+  RawCoilDecoder frees its off-heap buffer; `SpektraEngine` guards simulate/bake against a
+  closed engine.
+- **Honest disclosures**: DIR-gamma matrix sliders are visibly gated (per-stock engine
+  overwrite — no effect); the Glare section notes it applies on the print route only;
+  MALLETT2019 stays gated as unimplemented.
+
+### Performance
+- **Film-density memo on BOTH routes** (was print-only): single slot per route, keyed by a
+  full content+param digest that now folds every deterministic spatial shape param — so
+  spatial-ON renders memoize too; bypass only for debug taps + grain. Key-completeness is
+  test-enforced per param.
+- **Print-density memo**: `print_expose`+`print_develop` memoize on the film-density buffer
+  CONTENT + all printing inputs (plus the tc_lut-shaping film params the midgray factor reads
+  directly) — an output-only edit (scanner/output space/tone curve/glare) reruns `scan()`
+  alone. Works even with grain on (seeded grain is deterministic, so the content hash matches).
+- **Serial loop parallelization (S4)**: the DIR-coupler develop loops (pointwise + spatial
+  variant), the exposure→density interpolation, and `expose`'s bw-correction/log10 tails now
+  run through the deterministic `parallel_for` — byte-identical output for any thread count
+  (grain stays serial; the recursive blur filters stay serial).
+- **Retained-result grade cache (Kotlin)**: Saturation/Vibrance/Gamut/mask edits re-grade the
+  retained pristine engine output — zero native work on grade-only edits, in both the draft
+  and settle passes.
+- Bench (512×512, deterministic params, `SPK_NUM_THREADS=8` on a 4-core host, median): warm
+  print edits that keep the film density (y-shift steady state, output-only) run **153–162 ms
+  vs 402 ms cold**; warm scan repeats / output-only edits **144–159 ms vs 243 ms cold** (the
+  per-route film memos). S4 takes cold scan **243→211 ms (−13%)**. A tap-based decomposition
+  shows the print stages themselves cost only ~5 ms at this size (print_expose was already
+  parallel), so the print-density memo's absolute win grows with export resolution and on the
+  enlarger-diffusion/enlarger-LUT paths, and it is what keeps grain-ON print edits (film memo
+  bypassed) from re-running the print stages.
 
 ### CI
 - **engine-parity now honors the test exit code.** `build_run` fails on a non-zero test exit
   (`PIPESTATUS[0]`) or empty output, not only on a "FAIL" string — so a missing-asset/setup
   failure or a crash before any print can no longer silently report green. The grep stays
   case-insensitive.
+- **Gate count 26 → 33**: + `small_preview_aa`, `print_curves_morph`, `np_interp`,
+  `gamut_out_aces`, `gamut_in_xy`, `spatial_decouple_e2e`, `print_spatial_e2e`.
+  `test_parallel` runs each thread-count on a fresh engine (the memo would otherwise make
+  the 1-vs-8 filming comparison vacuous) and adds the print+grain+halation case.
 
 ## v0.7.0 — engine completion: APK-direct assets + enlarger LUT 🎞️
 

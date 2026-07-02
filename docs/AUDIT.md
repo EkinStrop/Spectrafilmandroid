@@ -110,38 +110,48 @@ not a commitment to do all of it.
   spectral blur, hanatos window/surface, output color spaces + CCTF, geometry incl. the `<1` AA
   prefilter, scanner/enlarger LUTs, preflash trio, dichroic Y/M, print exposure/gamma, scanner b/w
   corrections route-gated correctly). **Open findings (NOT yet fixed; severity-ranked):**
-  - 🔴 **`rgb_to_raw_method = MALLETT2019` — MIS-WIRED (filming).** UI dropdown offers it and the
-    oracle has a real `rgb_to_raw_mallett2019` (`utils/spectral_upsampling.py:283`), but **no
-    Mallett path exists in C++** — the value only perturbs the tc_lut cache key; the engine always
-    runs Hanatos2025. Selecting Mallett silently changes nothing. **Decision pending: implement
-    (new spectral basis + oracle golden) vs remove the dropdown option.**
-  - 🟠 **Highlight-boost trio `halation.boost_ev`/`boost_range`/`protect_ev` — INERT (filming).**
-    The oracle's `boost_highlights` stage (`filming.py:58-60`, called unconditionally, gated only
-    on `boost_ev>0`, independent of halation) is entirely UNPORTED (`diffusion.cpp:55` literally
-    "Not applied here"). Three live sliders do nothing. Default `boost_ev=0` is identity so goldens
-    stay green. Fix: port `numba_boost_hightlights.boost_highlights` into `expose`, gate `>0`, new
-    golden (boost_ev>0). **Pure parity fix, no decision needed.**
-  - 🟡 **Spatial-effects conflated under `halation_active` — PARTIAL (filming+scanning).** Camera
-    lens-blur, camera diffusion filter (Black-Pro-Mist), DIR spatial diffusion, scanner unsharp +
-    scanner lens-blur are ALL gated on the single `halation_active` toggle (`spatial =
-    (halation_active != 0)`), whereas the oracle gates each independently (`deactivate_spatial_effects`
-    is a debug flag, default False). Turning halation OFF silently kills them. Schema-default
-    `scanner_unsharp=(0.7,0.7)` therefore no-ops unless halation on. Lens-blur sliders disclose this
-    in tooltips; the **camera diffusion filter does not**. **Decision pending: keep the
-    "halation = master spatial switch" design (+ disclose) vs decouple to per-effect gating (more
-    correct, new "effect-on/halation-off" golden).**
-  - 🟡 **Print route hard-forces film grain + spatial OFF — PARTIAL (filming).** `run_print` forces
-    the negative's `spatial_effects=false` and never digests grain (`spektra.cpp` ~1007-1021),
-    pinned to the `print_portra` goldens (which set `deactivate_spatial_effects=True`). The oracle's
-    normal print path does NOT deactivate them, so a user printing loses all film grain/halation.
-    **Decision pending: keep (lower risk) vs honor toggles on the print route (new print-route
-    golden with grain/spatial on).**
-  - ⚪ **Dead-but-oracle-consistent UI controls (UX honesty, NOT parity).** DIR-coupler gamma
-    sliders (`gamma_samelayer_rgb`, 3× `gamma_interlayer_*`) — film-baked, the oracle overwrites
-    them per-film too; `enlarger_lens_blur` — the oracle never consumes `enlarger.lens_blur` either
-    (vestigial upstream); film-side `glare_*` (`glare_active/percent/roughness/blur`) — dead on the
-    `scan_film` route and dead upstream (`film_render.glare` declared but never read). All present
-    as live UI controls that do nothing. **Decision pending: dim+disclose vs remove.**
+  - 🟡 **`rgb_to_raw_method = MALLETT2019` — DISCLOSED, impl still open (filming).** The UI
+    dropdown now wraps the option in a `GatedBlock` ("MALLETT2019 isn't implemented yet — both
+    options currently render as HANATOS2025", `MainActivity.kt` CouplersSection region), so the
+    user is no longer misled. **No Mallett path exists in C++** — the oracle's real
+    `rgb_to_raw_mallett2019` (`utils/spectral_upsampling.py:283`) remains unported; the value only
+    perturbs the tc_lut cache key. **Open: implement (new spectral basis + oracle golden) vs
+    remove the dropdown option.**
+  - ✅ **Highlight-boost trio `halation.boost_ev`/`boost_range`/`protect_ev` — WIRED.**
+    `boost_highlights` is ported into `expose` (threaded UNCONDITIONALLY, matching the oracle's
+    spatial-independent placement), gated on `boost_ev > 0`, and parity-gated by
+    `test_highlight_boost_e2e` (golden `scan_portra_boost`, oracle c1d0e44).
+  - ✅ **Spatial-effects conflation under `halation_active` — FIXED (E1, 2026-07-02).** Every
+    spatial effect now gates on its OWN params (zero = inert), exactly matching the oracle's
+    per-effect self-gating; `halation_active` gates ONLY halation/scatter (its UI meaning); the
+    oracle's `deactivate_spatial_effects` debug switch is expressed by zeroing per-effect fields.
+    Parity-gated by `test_spatial_decouple_e2e` (golden `scan_portra_lensblur_nohalation`: lens
+    blur ON with halation OFF — the composition the master gate could not produce). Note the
+    schema-default `scanner_unsharp=(0.7,0.7)` and `dir_diffusion_size_um=20` are therefore live
+    whenever their own gates allow, independent of halation.
+  - ✅ **Print route film grain + spatial — FIXED (E2, 2026-07-02).** `run_print` now runs the
+    SAME per-effect-gated filming as the scan route (halation/scatter, DIR spatial diffusion,
+    camera diffusion, lens blur, AgX grain all honored), matching the oracle's single
+    FilmingStage. Parity-gated by `test_print_spatial_e2e` (golden `print_portra_spatial`;
+    pre-fix the engine sat ~1.8e-2 from it). Grain half checked statistically vs the oracle
+    (mean_abs 1.468e-2 both, max_abs 0.6190 vs 0.6189) — no CI golden (RNG streams differ).
+    ⚠ INTENTIONAL default print-route look change in the app (halation defaults ON).
+  - ⚪ **Dead-but-oracle-consistent UI controls — DISCLOSED (F7, 2026-07-02).** DIR-coupler gamma
+    sliders (`gamma_samelayer_rgb`, 3× `gamma_interlayer_*`) are wrapped in a `GatedBlock`
+    ("set per film stock by the engine — no effect": the oracle's `_apply_film_specifics`
+    overwrites them per-film too); `enlarger_lens_blur` was already GatedBlock-disclosed (no
+    engine call site; vestigial upstream); the Glare section carries an inline "applies on the
+    print route only" note (live on the print route, not dimmed). Removal remains an option if
+    disclosure proves noisy.
+- ✅ **Gamut compression (output + input) — WIRED end-to-end (PR #105 + #109).** Output:
+  ACES RGC v1.3 (`model/gamut_compression.cpp::compress_rgb_aces_rgc`, shared `reinhard_knee`),
+  default `kLegacyClip`, gated by `test_gamut_out_aces`. Input: radial-to-locus xy compression
+  baked into the filming tc_lut (`compress_xy_radial` + `remap_tc_lut_for_compression`), default
+  `kOff`, gated by `test_gamut_in_xy`. Both flags flow spk_params → JNI → `SpektraParams.IoParams`
+  → two dropdowns under Simulation→Output; `input_gamut_compress` is folded into the tc_lut cache
+  key + the film-density memo key. The Reinhard knee stays at the oracle default (0,1,6) — not
+  user-exposed in v1. Perceptual output algos (cam16ucs/oklch/oklrab/jzazbz) remain OPEN (P2 #6,
+  reserved enum slots).
 - ✅ **Scanner black/white corrections** (`scanner_white_correction` / `_black_correction` /
   `_white_level` / `_black_level`) **WIRED (this PR).** Port of
   `runtime/services/color_reference.py` (`ColorReferenceService`) +

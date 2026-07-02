@@ -67,13 +67,19 @@ test_tonecurve      "$ASSET/profiles/kodak_portra_400.json" "$G/scan_portra"
 test_half
 ```
 
+(Excerpt only — the suite has since grown to **33 gates** (downscale, small_preview_aa,
+spectral_blur/hanatos_surface/camera_uvir/preflash/print_evcomp/scanner_bwcorr/
+provia_couplers/highlight_boost e2e wiring gates, print_curves_morph, np_interp,
+gamut_out_aces, gamut_in_xy, bake_lut, params_passthrough, spatial_decouple_e2e,
+print_spatial_e2e). `.github/workflows/ci.yml` is the authoritative list + argv.)
+
 `SPK_NUM_THREADS` overrides `std::hardware_concurrency()`. The parity tests pin `1` vs `8` to
 prove byte-identical output.
 
 ## 3. CI jobs (`.github/workflows/ci.yml`)
 
 - **`engine-native`** — host C++ build of `libspektra`.
-- **`engine-parity`** — the 15-test stage gate above (run on push/PR).
+- **`engine-parity`** — the 33-test stage gate (run on push/PR; see ci.yml for the list).
 - **`parity`** — `.spkvec` comparator self-test (`tools/parity/` CMake + ctest).
 - **`python-lint`**.
 - **`android`** — `:app:testDebugUnitTest` + full assemble for all ABIs.
@@ -163,11 +169,12 @@ Ignore `feature/film-emulation/` and the aspirational `core/`/feature layout in
 - **GPU preview is not bit-reproducible.** GPU float varies by vendor; the parity engine is CPU
   C++ only. `LutGpuPreview.kt` is default OFF with no on-device validation. Never route
   `simulate`/export through GPU. (HANDOFF.md 51-58, AUDIT.md 42-46)
-- `isMinifyEnabled = false` (un-minified dex ~23 MB; R8 keep-rules not yet validated).
+- Release `isMinifyEnabled = true` (R8 shrink, `-dontobfuscate` + JNI/enum keep-rules; the R8
+  path is NOT CI-exercised — smoke-test a release build on a device before tagging).
 
 ## 9. Version & release
 
-- `versionCode 9` / `versionName 0.7.0`.
+- `versionCode 10` / `versionName 0.8.0`.
 - Commit with `-c commit.gpgsign=false` (signing server rejects signing here).
 - Release signing: `keystore.properties` (`storeFile`/`storePassword`/`keyAlias`/`keyPassword`)
   in repo root; absent -> falls back to debug signing. Never commit a real keystore or an APK.

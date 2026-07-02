@@ -280,6 +280,10 @@ class MainActivity : ComponentActivity() {
         // that the same buffer can be re-fed to the engine without a defensive copy. EXPORT and
         // EXPORT does NOT use this cache — it always decodes fresh at EXPORT_MAX_EDGE_PX.
         val sourceCache = remember { DecodedSourceCache() }
+        // Retained-result grade cache: grade-only edits (saturation/vibrance/gamut/
+        // masks) re-grade the last settle render's pristine engine output in pure
+        // Kotlin — zero native work. Keyed by engine params + decode key + edge.
+        val gradeCache = remember { GradeCache() }
         DisposableEffect(Unit) { onDispose { sourceCache.invalidate() } }
 
         // PERF/OOM: a SECOND single-entry cache for the MAX_EDGE_PX whole-image proxy used by the
@@ -952,6 +956,24 @@ class MainActivity : ComponentActivity() {
             roiOverlay = null  // bitmap recycled by DisposableEffect(roiOverlay)
         }
 
+        // Everything that feeds the NATIVE render for a fit preview at [fullEdge]:
+        // the engine-param snapshot + the decode key. Reads Compose state — call on
+        // the main thread. Grade inputs are deliberately absent (see GradeCache).
+        fun gradeCacheKey(fullEdge: Int): GradeCache.Key {
+            val filmBalance =
+                if (state.balanceToFilmStock && FilmStockBalance.isMeaningful(ctx, state.filmProfile)) state.filmProfile else ""
+            return GradeCache.Key(
+                engineParams = state.toParams(skipGrainHalation = true),
+                decode = GradeCache.DecodeKey(
+                    uri = sourceUri?.toString(), kind = sourceKind.name,
+                    whiteBalance = state.rawWhiteBalance, temperature = state.rawTemperature,
+                    tint = state.rawTint, creativeTemp = state.creativeWbTemp,
+                    creativeTint = state.creativeWbTint, filmBalance = filmBalance,
+                    rotationDegrees = rotation.degrees, maxEdge = fullEdge,
+                ),
+            )
+        }
+
         // Live DRAFT pass — the Lightroom-style render-system "port": on EVERY edit (a slider drag,
         // a preset/dropdown/toggle, a rotation), paint a small fast proxy so the image tracks the
         // change in ~hundreds of ms instead of sitting on the stale frame until the full settle
@@ -967,6 +989,19 @@ class MainActivity : ComponentActivity() {
                 val e = engine ?: return@collect
                 if (cropOverlayOpen || maskOverlayOpen || sampleOverlayOpen || compareMode) return@collect
                 val fullEdge = state.previewMaxSize.coerceAtLeast(256)
+                // Grade-only edit? Re-grade the retained full-quality settle result in
+                // pure Kotlin — zero native work, and it beats a low-res draft on quality.
+                gradeCache.lookup(gradeCacheKey(fullEdge))?.let { pristine ->
+                    runCatching {
+                        withContext(Dispatchers.Default) {
+                            gradeBufferToBitmap(pristine.scratchCopy(), pristine.width,
+                                pristine.height, pristine.colorSpace, state.savingCctfEncoding,
+                                state.saturation, state.vibrance, state.gamutCompress,
+                                state.localAdjustments)
+                        }
+                    }.onSuccess { bmp -> withContext(Dispatchers.Main) { preview = bmp } }
+                    return@collect
+                }
                 val draftEdge = minOf(DRAFT_RENDER_MAX_PX, fullEdge)
                 if (draftEdge >= fullEdge) return@collect       // no meaningful step-down to draft
                 val proxy = sourceCache.get(
@@ -1003,23 +1038,41 @@ class MainActivity : ComponentActivity() {
             status = "rendering preview…"
             val renderStart = System.currentTimeMillis()
             val fullEdge = state.previewMaxSize.coerceAtLeast(256)
+            // Key built on MAIN (reads Compose state); the same snapshot renders below,
+            // so the key and the render can never disagree.
+            val cacheKey = gradeCacheKey(fullEdge)
+            val cached = gradeCache.lookup(cacheKey)
+            val prevBefore = beforePreview
             val result = runCatching {
                 withContext(Dispatchers.Default) {
-                    decoding = true
-                    // The live DRAFT effect above already paints a fast low-res proxy during the
-                    // edit, so this settle pass goes straight to the crisp full render (no separate
-                    // coarse pass / extra fresh decode). Cached proxy source — re-decodes only when
-                    // a decode-affecting key (URI/kind/WB/temp/tint/rotation/edge) changed;
-                    // look-param edits reuse it.
-                    val image = loadSourceCachedForPreview(fullEdge)
-                    decoding = false
-                    val before = linearToDisplayBitmap(image)
-                    // Fit preview skips grain/halation (the user's "grain at 100%" choice): they
-                    // are rendered by the zoom ROI, the magnifier and export, never the fit settle.
-                    val after = e.simulatePreview(image, state.toParams(skipGrainHalation = true)).use { res ->
-                        simResultToBitmapGraded(res, state.savingCctfEncoding, state.saturation, state.vibrance, state.gamutCompress, state.localAdjustments)
+                    if (cached != null && prevBefore != null) {
+                        // Grade-only edit (identical engine inputs): re-grade the retained
+                        // pristine engine result — ZERO native work. The ungraded `before`
+                        // is unchanged by construction.
+                        prevBefore to gradeBufferToBitmap(cached.scratchCopy(), cached.width,
+                            cached.height, cached.colorSpace, state.savingCctfEncoding,
+                            state.saturation, state.vibrance, state.gamutCompress,
+                            state.localAdjustments)
+                    } else {
+                        decoding = true
+                        // The live DRAFT effect above already paints a fast low-res proxy during the
+                        // edit, so this settle pass goes straight to the crisp full render (no separate
+                        // coarse pass / extra fresh decode). Cached proxy source — re-decodes only when
+                        // a decode-affecting key (URI/kind/WB/temp/tint/rotation/edge) changed;
+                        // look-param edits reuse it.
+                        val image = loadSourceCachedForPreview(fullEdge)
+                        decoding = false
+                        val before = linearToDisplayBitmap(image)
+                        // Fit preview skips grain/halation (the user's "grain at 100%" choice): they
+                        // are rendered by the zoom ROI, the magnifier and export, never the fit settle.
+                        // Render with cacheKey.engineParams — the exact snapshot the key hashed.
+                        val after = e.simulatePreview(image, cacheKey.engineParams).use { res ->
+                            // Retain the PRISTINE engine output BEFORE the grade mutates res.data.
+                            gradeCache.store(cacheKey, res.data, res.width, res.height, res.colorSpace)
+                            simResultToBitmapGraded(res, state.savingCctfEncoding, state.saturation, state.vibrance, state.gamutCompress, state.localAdjustments)
+                        }
+                        before to after
                     }
-                    before to after
                 }
             }
             decoding = false

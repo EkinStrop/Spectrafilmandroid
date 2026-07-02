@@ -231,6 +231,11 @@ jobs:
           # opt-in kAcesRgc math.
           build_run test_gamut_out_aces tests/gamut_aces_cases.bin
           build_run test_gamut_out_oklch tests/gamut_oklch_cases.bin
+          # OPT-IN output gamut compression — Oklrab (model/gamut_compression.cpp::
+          # compress_rgb_oklrab_chroma): the oklch chroma reduction with the C_max lookup
+          # indexed by Ottosson's rebased lightness Lr. Gated bit-exact vs the oracle
+          # golden; scanning defaults to kLegacyClip so every other golden is byte-identical.
+          build_run test_gamut_out_oklrab tests/gamut_oklrab_cases.bin
           # OPT-IN input gamut compression — radial xy compression toward the visible
           # spectral locus (model/gamut_compression.cpp::spectral_locus_xy +
           # compress_xy_radial, reusing the shared reinhard_knee) plus the tc_lut

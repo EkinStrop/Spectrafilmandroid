@@ -1,5 +1,9 @@
 # Engine wiring plan — the gated parameters
 
+> **STATUS 2026-07-02: COMPLETE** — every inert engine param with an oracle call site is wired and
+> parity-gated (all sections ✅); §4 enlarger lens blur remains intentionally unwireable
+> (GatedBlock disclosure in UI). Historical record; the Sequence section is done.
+
 Status snapshot 2026-06-01, updated 2026-06-04. **§3 (`use_enlarger_lut`) is WIRED**
 (shipped in v0.7.0, opt-in/default-off, gated by `test_enlarger_lut_e2e`). **§2
 (`spectral_gaussian_blur`) is WIRED** (default-off no-op, gated by the `scan_spectral_blur`

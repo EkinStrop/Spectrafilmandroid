@@ -1,8 +1,11 @@
 # Roadmap
 
-> **ℹ️ Status synced to v0.7.0 — read `CHANGELOG.md` + `HANDOFF.md` + `docs/AUDIT.md` for the
-> live snapshot.** The milestone *structure* below is still a useful overview, and the per-item
-> status markers have been corrected to match the merged state:
+> **ℹ️ Status synced to v0.8.0 (versionCode 10) — read `CHANGELOG.md` + `HANDOFF.md` +
+> `docs/AUDIT.md` for the live snapshot.** The milestone *structure* below is still a useful
+> overview, and the per-item status markers have been corrected to match the merged state:
+> - ✅ **v0.8.0 wave:** masking v1, Lightroom-style export sheet (incl. TIFF32F/scene-linear),
+>   `.cube`/CLF LUT export, WB wave, opt-in gamut compression, per-effect spatial gating +
+>   print-route spatial/grain, engine memos, parity suite now 33 gates.
 > - ✅ **`use_enlarger_lut` is wired** (2026-06-01) — opt-in/default-off, default path
 >   byte-identical, gated by `test_enlarger_lut_e2e`. No reserved engine LUT flag remains.
 > - ✅ **AAssetManager APK-direct asset load is done** (2026-06-01) — the engine reads profiles,
@@ -22,8 +25,8 @@ Milestones are vertical slices. Each ends with something demonstrable and a pari
 > The app exposes the whole `RuntimePhotoParams` control surface, plus Lightroom-informed
 > additions: **non-destructive recipe/sidecar editing** and a **proxy-preview vs full-res-export**
 > model. The parity-bearing engine is **CPU C++/NDK** (GPU can't be bit-reproducible across
-> vendors); a GPU preview accelerator is an optional M6 item. Only niche file I/O (EXR /
-> 32-bit-float TIFF) is deferred.
+> vendors); a GPU preview accelerator is an optional M6 item. Only EXR file I/O is deferred —
+> 32-bit-float TIFF (including scene-linear untagged TIFF32F) shipped in the export sheet.
 
 > **Progress note (2026-05-29):** beyond M0, a parallel scaffolding wave has landed real,
 > compiling code ahead of the host bootstrap: the C++ engine's pure-math + kernel layer
@@ -59,9 +62,9 @@ Milestones are vertical slices. Each ends with something demonstrable and a pari
 > enabled** (2026-06-04) — `isMinifyEnabled = true`, Stage 1 *shrink only* (`-dontobfuscate`) with
 > keep-rules for the four name-based JNI boundaries and enum persistence (`app/proguard-rules.pro`);
 > Stage 2 obfuscation is deferred. Only minor, by-design items remain: bit-exact glare-on-print is
-> impossible (stochastic), and a handful of UI toggles (`apply_hanatos2025_*`, enlarger lens blur)
-> are still unwired pending new oracle goldens (tracked in `docs/AUDIT.md` +
-> `docs/ENGINE_WIRING_PLAN.md`).
+> impossible (stochastic), and enlarger lens blur stays unwired by design (no oracle call site;
+> GatedBlock-disclosed). The `apply_hanatos2025_*` window/surface toggles are WIRED
+> (`test_hanatos_surface_e2e`) — tracked in `docs/AUDIT.md` + `docs/ENGINE_WIRING_PLAN.md`.
 >
 > **Milestone progress (v0.5.0 → v0.6.x → v0.7.0):** v0.5.0 landed the Lightroom-feel editor wave;
 > the v0.6.x line fixed the full-resolution / off-heap RAW export OOM (PR #56) and bumped through
@@ -172,9 +175,11 @@ Add printing stage, DIR couplers, grain, halation/scatter, glare, diffusion filt
 > yet active" badges were removed. The **enlarger LUT (`use_enlarger_lut`) was since wired too**
 > (2026-06-01, opt-in/default-off, gated by `test_enlarger_lut_e2e`). Minor remainder:
 > glare-on-print is wired but default-off (stochastic, not bit-exact). Downscale
-> (`upscale_factor < 1`) anti-aliasing prefilter is a documented follow-up.
+> (`upscale_factor < 1`) anti-aliasing prefilter is DONE — parity-gated by `test_downscale`.
 
-## M5 — UI/UX + non-destructive editing (`feature:film-emulation`)
+## M5 — UI/UX + non-destructive editing  ✅ complete
+Shipped in the standalone `:app` module (not `feature:film-emulation`), and has since been
+exceeded (tone curve, masking v1, WB wave, export sheet).
 Full `RuntimePhotoParams` control surface (camera/enlarger/scanner/grain/halation/couplers/
 glare/diffusion/IO/settings), film+print profile pickers, **proxy preview vs full-res scan**,
 before/after compare, export with EXIF+ICC.
@@ -187,10 +192,9 @@ before/after compare, export with EXIF+ICC.
 
 ## M6 — Performance, GPU accelerator & polish
 Tile/threading, native SIMD (NEON), preset save/load, profile catalog UI, About/credits with
-attribution, APK-size review. Optional **GPU preview accelerator** (Vulkan / GL ES compute) for
-slider interactivity — validated against CPU goldens to a *visual* tolerance, never the parity
-gate; export stays on the CPU engine. Optional "bake to 3D `.cube` LUT" export. Deferred file I/O
-(EXR / 32-bit-float TIFF) can also land here behind the writer interface.
+attribution, APK-size review. Optional **GPU preview accelerator**: see `docs/PERF_ROADMAP.md` #1
+(that doc owns the GPU plan). 3D LUT export DONE (`.cube` + CLF v3, 17/33/65 sizes). Only EXR
+file I/O is deferred — 32-bit-float TIFF shipped in the export sheet.
 - **Done when:** proxy preview is interactive on a mid-range device; full scan acceptable; GPU
   path (if shipped) matches CPU within visual tolerance.
 
@@ -210,8 +214,9 @@ gate; export stays on the CPU engine. Optional "bake to 3D `.cube` LUT" export. 
 > on 2-wide NEON f64; armv7 scalarises) → **~6× vs the original scalar/single-thread baseline** with
 > threading. `expose()` (gather-bound) and the per-pixel `10^log_xyz` round-trips stay scalar.
 >
-> Still open in M6: memory tiling for very large RAW (spatial-stage haloing), the optional GPU
-> preview accelerator, profile-catalog UI, and the downscale anti-aliasing prefilter. **APK-size
+> Still open in M6: memory tiling for very large RAW. The downscale AA prefilter and
+> profile-catalog UI shipped; an experimental default-OFF GPU LUT preview exists
+> (`LutGpuPreview.kt`) pending on-device validation (see `docs/PERF_ROADMAP.md` #1). **APK-size
 > review landed** (2026-06-04): R8 Stage-1 shrink is now on (`isMinifyEnabled = true`, no
 > obfuscation, JNI/enum keep-rules — `app/proguard-rules.pro`); Stage-2 obfuscation deferred.
 
@@ -232,16 +237,17 @@ The "do this when literally everything else is done" list:
   push via the API). Ready-to-paste text is in `docs/RELEASE_CHECKLIST.md`.
 - **Remaining (M7/polish):** the gated engine stages are now live (crop, auto-exposure,
   diffusion, lens blur, scanner LUT accel, **enlarger LUT**). Only bit-exact glare-on-print
-  (stochastic) remains by-design, plus a couple still-unwired UI toggles (`apply_hanatos2025_*`,
-  enlarger lens blur) pending new oracle goldens — see `docs/AUDIT.md`.
+  (stochastic) remains by-design, plus enlarger lens blur (unwired by design, no oracle call
+  site; GatedBlock-disclosed) — see `docs/AUDIT.md`.
   Release signing is **in place**: `release.yml` publishes a signed APK on a `v*` tag, and local
   release builds read `keystore.properties` (debug fallback only when that file is absent), so
   there is no debug-signed release blocker. **R8 is enabled** (Stage-1 shrink, no obfuscation,
-  JNI/enum keep-rules); Stage-2 obfuscation remains the only deferred size item.
+  JNI/enum keep-rules); R8 Stage-2 + `shrinkResources`: see `docs/AUDIT.md` §D (which owns that
+  open item).
 
 ## Cross-cutting
 - CI: build all ABIs; run golden-vector parity tests; lint.
-  → Implemented in `.github/workflows/ci.yml` (see `.github/workflows/README.md`): the
-  `engine-native`, `parity`, and `python-lint` jobs run today; the `android` job auto-activates
-  when the host is seeded at M1 (guarded on `settings.gradle.kts`).
+  → Implemented in `.github/workflows/ci.yml` (see `.github/workflows/README.md`): the standing
+  jobs are `engine-native`, `engine-parity` (33 gates), `parity`, `python-lint`, `android`
+  (`testDebugUnitTest` + assemble + 16 KB check), and `android-emulator` (manual dispatch only).
 - Each engine PR cites which golden vectors it turned green.

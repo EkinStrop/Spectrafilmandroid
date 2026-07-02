@@ -5,7 +5,10 @@ builds a production-signed APK from keystore secrets and publishes it (plus a `.
 GitHub Release asset. **APKs are not committed to the repository** — there is no `dist/` directory
 and you should never copy a built APK into the repo.
 
-Current shipping version: **v0.7.0 / versionCode 9** (`minSdk 24`, `targetSdk`/`compileSdk 34`).
+Current in-tree version: **v0.8.0 / versionCode 10** (`minSdk 24`, `targetSdk`/`compileSdk 34`);
+latest released tag is **v0.7.0**.
+(The R8 release smoke was last device-validated 2026-06-04 on 0.7.x — the 0.8.0 minified build
+still needs its pre-tag device smoke.)
 
 ---
 
@@ -42,7 +45,7 @@ The single `build-signed-apk` job (Ubuntu runner) then:
 
 ## 2. Pre-tag checklist
 
-- [ ] Bump `versionCode` and `versionName` in `app/build.gradle.kts` (currently `9` / `"0.7.0"`).
+- [ ] Bump `versionCode` and `versionName` in `app/build.gradle.kts` (currently `10` / `"0.8.0"`).
 - [ ] Update `CHANGELOG.md` for the new version.
 - [ ] Note: the release build now runs **R8** (`isMinifyEnabled = true`, `app/build.gradle.kts:53`).
   This is **Stage 1 — shrink only, `-dontobfuscate`** (`app/proguard-rules.pro:2`), with explicit
@@ -50,8 +53,8 @@ The single `build-signed-apk` job (Ubuntu runner) then:
   `TiffWriter`, `PngWriter`, `native <methods>`) and enum value/`valueOf` persistence. Because the
   JNI symbols resolve classes/methods by literal string from C++, a missing keep-rule surfaces only
   at runtime — sanity-check that a release build still loads native libs and exports/decodes before
-  publishing (the `android-emulator` job is manual-only and not a standing gate). Obfuscation
-  (Stage 2) is still deferred.
+  publishing (the `android-emulator` job is manual-only and not a standing gate). R8 Stage-2 +
+  `shrinkResources`: see `docs/AUDIT.md` §D (which owns that open item).
 - [ ] Confirm CI is green on `main`. The relevant gating jobs in `.github/workflows/ci.yml` are:
   - `engine-native` — host C++ build of libspektra.
   - `engine-parity` — the stage parity gate (deterministic goldens, thread-invariance).
@@ -130,7 +133,7 @@ used for the `gh release` calls.)
   (`gh release create`/`upload`), `:133-136` (keystore cleanup).
 - `.github/workflows/ci.yml:32-176` (gating jobs), `:208-228` (16 KB `zipalign -P 16` +
   `readelf -lW` `LOAD 0x4000` check).
-- `app/build.gradle.kts:10-17` (keystore.properties read), `:35-36` (versionCode 9 / 0.7.0),
+- `app/build.gradle.kts:10-17` (keystore.properties read), `:35-36` (versionCode 10 / 0.8.0),
   `:53` (`isMinifyEnabled = true` — R8 shrink), `:60-66` (real-keystore-else-debug signing).
 - `app/proguard-rules.pro` (R8 Stage-1 keep-rules: JNI boundary classes + enum persistence,
   `-dontobfuscate`).

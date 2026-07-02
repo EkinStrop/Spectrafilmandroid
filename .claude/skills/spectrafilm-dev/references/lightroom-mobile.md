@@ -5,7 +5,7 @@ anything in `app/src/main/java/com/spectrafilm/app/**`. The editor is a parametr
 non-destructive, Lightroom-style stack over the parity-critical CPU/NDK engine. Engine and
 build rules live in `references/parity-and-build.md`.
 
-The editor (~27 Kotlin files) — key ones:
+The editor (~56 Kotlin files) — key ones:
 - `MainActivity.kt` — edge-to-edge Compose, pinned preview, 90 degree rotate, scrollable
   category bar (12 categories), `AnimatedVisibility` panel, double-back-to-exit.
 - `ParamsState.kt` — flat Compose-observable mirror of `SpektraParams`; `mutableStateOf` per
@@ -16,10 +16,21 @@ The editor (~27 Kotlin files) — key ones:
   ROI render (debounced visible-region native re-render overlay); `CompareSlider`;
   `HistogramCard` (off-thread Canvas); `MagnifierOverlay`.
 - `CropOverlay.kt` — drag corners/edges, pin aspect; geometry stage `crop`/`crop_center`/`crop_size`.
+- `masks/` + `MaskPanel.kt` — masking v1: radial/linear + luminance/color range masks, 13 local
+  ops incl. spatial Clarity/Texture/Sharpness/Highlights/Shadows, draw-on-preview gesture
+  overlay (`MaskGeometryOverlay.kt`), eyedroppers.
+- `ExportSheet.kt` / `ExportOptions.kt` — Lightroom-style export sheet: formats/quality/sizes
+  (JPEG/UltraHDR quality, PNG16, TIFF16, TIFF32F, scene-linear TIFF32F).
+- `ClfWriter.kt` — LUT export: `.cube` + CLF v3 with 17/33/65 size picker.
+- WB controls — gray-point eyedropper (`LocalWhiteBalance.kt`), film-stock balance/virtual-85
+  (`FilmStockBalance.kt`, `CreativeWhiteBalance.kt`); auto-exposure default ON.
+- `GradeCache.kt` — the S3 grade-cache rule: grade-only (post-engine) edits reuse the retained
+  engine result — **zero native work**.
 - `Presets.kt` — save/load/import/export versioned JSON (`org.json`); every field round-tripped.
 - `Recipes.kt` — non-destructive sidecar keyed to source RAW URI in `filesDir/recipes/`.
-- `BuiltInPresets.kt` — 21 curated film -> paper looks.
+- `BuiltInPresets.kt` — 28 curated film -> paper looks (`assets/spektra/presets.json`).
 - `ProfileCurvesScreen.kt`, `SettingsScreen.kt`, `EditHistory.kt`, `LutGpuPreview.kt`.
+- Preset/recipe/diagnostics IO runs off the main thread with serialize-on-main.
 
 ## 1. Editing model — parametric, never pixel-baked
 
@@ -115,7 +126,9 @@ The editor (~27 Kotlin files) — key ones:
 - **16-bit export** (`:lib:tiffwriter` / `:lib:pngwriter`): recommended wide-gamut PNG = 16-bit
   per channel + embedded ICC + no extraneous metadata. **Carry the engine's output color space**
   (scanning emits XYZ -> output RGB in one of 6 spaces) into the embedded profile so the file is
-  self-describing. Other export: JPEG 8-bit; Ultra HDR (Android 14+); EXR/32-bit deferred.
+  self-describing. Export sheet: JPEG (quality), Ultra HDR (Android 14+, quality), PNG16,
+  TIFF16, TIFF32F, scene-linear untagged TIFF32F, with size options; LUT export: `.cube` +
+  CLF v3 with 17/33/65 size picker. Still open: AVIF/HEIC, linear DNG.
   `EXPORT_MAX_EDGE_PX = 16384`. **FLAG:** the exact "no extraneous metadata" wording came from a
   search excerpt only — verify against a colour-management reference before quoting verbatim.
 

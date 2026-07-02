@@ -1,4 +1,4 @@
-# Audit — incomplete / open items (updated 2026-06-05)
+# Audit — incomplete / open items (updated 2026-07-02)
 
 A sweep of the codebase and docs for things that are **not complete**: genuine feature gaps,
 stale docs that misstate status, test-coverage holes, and release/build follow-ups. Grouped by
@@ -21,6 +21,8 @@ not a commitment to do all of it.
 - 🟡 **Memory tiling for very large RAW** (old issue #7) — still open. Only app-side mitigation
   exists (OOM-retry ladder in `decodeRawToLinear`, opt-in half-size decode). No native tiling /
   streaming / GPU path. The full-res scan holds several float buffers of `npix*3` at once.
+  (This entry is the canonical tracker — ROADMAP M6 and the backlog's tiled-pyramid bullet
+  should point here.)
 - ✅ **`use_enlarger_lut` wired (2026-06-01).** The enlarger-side 3D-LUT now accelerates the
   print-expose spectral integral in `printing.cpp::print_expose` (PCHIP LUT of
   `_film_cmy_to_print_log_raw` over `[-grain.density_min, nanmax(film.density_curves)]`),
@@ -116,7 +118,7 @@ not a commitment to do all of it.
     user is no longer misled. **No Mallett path exists in C++** — the oracle's real
     `rgb_to_raw_mallett2019` (`utils/spectral_upsampling.py:283`) remains unported; the value only
     perturbs the tc_lut cache key. **Open: implement (new spectral basis + oracle golden) vs
-    remove the dropdown option.**
+    remove the dropdown option** — decision scheduled as `PRIORITY_ROADMAP` #18.
   - ✅ **Highlight-boost trio `halation.boost_ev`/`boost_range`/`protect_ev` — WIRED.**
     `boost_highlights` is ported into `expose` (threaded UNCONDITIONALLY, matching the oracle's
     spatial-independent placement), gated on `boost_ev > 0`, and parity-gated by
@@ -241,33 +243,33 @@ not a commitment to do all of it.
 - ⚪ **GPU preview accelerator** — a default-OFF experimental GPU LUT preview path now exists
   (`LutGpuPreview.kt`, Settings → Experimental; renderer + cube parser unit-tested), but it is
   **unverified on a real GPU** (no GPU/emulator in CI) and the GPU surface lacks zoom/magnifier/
-  compare. Needs on-device verification before promotion. **EXR / 32-bit-float TIFF export** —
-  still deferred M6/M7.
+  compare. Needs on-device verification before promotion. **EXR export** — still deferred
+  (32-bit-float TIFF, including the scene-linear variant, shipped in the export sheet).
 - ⚪ **`RawCoilDecoder`** uses a "naive ACES→sRGB approximation" (`RawCoilDecoder.kt:75`, TODO) for
   the optional Coil gallery-decode path; not the main edit pipeline.
 
 ## B. Stale / inaccurate docs (status drift)
 
-- ✅ **`HANDOFF.md` current** — reflects v0.7.0 / `versionCode 9`, the AAssetManager + enlarger-LUT
-  completion, and the off-heap export-OOM fix. The earlier stale v0.3.0-wave description no longer
-  applies.
-- ✅ **`docs/PRESETS.md` preset count fixed** (2026-06-01) — was "20 curated presets" while
-  `presets.json` ships **21** (the `neutral_adobe_like` "Neutral (Adobe-like)" preset, added in
-  #55, was undocumented). The intro count, the group list, and `README.md` are now 21, and the
-  Neutral preset has its own documented section.
-- 🟡 **`docs/ROADMAP.md` is frozen pre-v0.5.0** — it still flags `use_enlarger_lut` as
-  reserved/unwired (×4), AAssetManager as the sole remaining M3 item, and a "debug-signed release"
-  blocker. All three are shipped (enlarger LUT wired + gated; AAssetManager wired; v0.7.0 signed via
-  `release.yml`). ROADMAP needs status flips + a v0.5.0/v0.6.x/v0.7.0 progress note.
+- ✅ **`HANDOFF.md` current + consolidated (2026-07-02)** — carries the START-HERE resume block
+  (next task P2 #6), the latest pass state, evergreen operating notes, and a compressed session
+  history (full text of the old session logs lives in the file's git history).
+- ✅ **`docs/PRESETS.md` preset count re-fixed** (2026-07-02) — the 2026-06-01 fix set the count
+  to 21, but `presets.json` now ships **28** (verified on disk). `docs/PRESETS.md`,
+  `docs/ASSETS.md`, and `README.md` now all say 28; presets added after `docs/PRESETS.md` was
+  written are described in `presets.json` itself.
+- ✅ **`docs/ROADMAP.md` drift — resolved and superseded.** The original pre-v0.5.0 freeze
+  (`use_enlarger_lut` flagged reserved/unwired ×4, AAssetManager as the sole remaining M3 item, the
+  "debug-signed release" blocker) was fixed by the earlier re-sync (action #1). The later residual
+  drift (banner stuck at v0.7.0, `apply_hanatos2025_*` "still unwired" ×2, downscale-AA
+  "follow-up", the M6 open-list, no v0.8.0 note) is superseded: ROADMAP refreshed 2026-07-02.
 
 ## C. Test-coverage gaps
 
 - 🟡 **JVM unit tests exist but instrumented (`androidTest`) coverage is still absent.**
-  `:app:testDebugUnitTest` now ships **6 suites / 30 tests, all green** (verified on-device-class
-  toolchain 2026-06-01): `EditHistoryTest` (undo/redo store), `PresetsRoundTripTest`
-  (recipe/sidecar serialize↔parse), `ToneCurveParamsTest`, `CubeLutTest` (GPU-preview LUT parser),
-  `McrawContainerTest` (`.mcraw` footer parser), `AppUpdaterTest`. The earlier "no Kotlin tests
-  anywhere" claim is **resolved**. Remaining holes: no automation for `ImagePipeline` export
+  JVM suites exist and are green (`EditHistoryTest`, `PresetsRoundTripTest`, `ToneCurveParamsTest`,
+  `CubeLutTest`, `McrawContainerTest`, `AppUpdaterTest`, plus suites added since — e.g.
+  `RotationTest`, `CropConstrainTest`, `BuiltInPresetsAssetTest`); run `:app:testDebugUnitTest`
+  for the authoritative count. The earlier "no Kotlin tests anywhere" claim is **resolved**. Remaining holes: no automation for `ImagePipeline` export
   quantisation, `DecodedSourceCache`, `EngineHelpers`, or `RawDecoder`/`PngWriter` JNI marshaling
   (these need Robolectric or an instrumented device run). Only C++ host tests + the LibRaw
   C++ unit/fuzz tests cover the native layer.
@@ -355,13 +357,14 @@ not a commitment to do all of it.
      to c1d0e44 (`print_portra_bwcorr` + `scan_provia_bwcorr`) + `test_scanner_bwcorr_e2e`. **With
      this, every named inert engine param from action #2 is resolved — action #2 is CLOSED.** See §A.
 3. **Resolve the open param-wiring-audit findings (2026-06-05, see §A "Full param-wiring audit").**
-   ✅ #1 print EV-compensation + `normalize_print_exposure` — FIXED (#80). Remaining, in order:
-   (a) 🟠 port the highlight-boost stage (`boost_ev`/`boost_range`/`protect_ev`) — pure parity fix,
-   no decision; (b) 🔴 MALLETT2019 — implement-vs-remove decision; (c) 🟡 spatial-effects per-effect
-   gating (decouple from `halation_active`) — keep-vs-decouple decision; (d) 🟡 print-route
-   grain/spatial — keep-vs-honor decision; (e) ⚪ dim/disclose-or-remove the dead-but-oracle-consistent
-   sliders (DIR gammas, enlarger lens blur, film glare). Each engine fix needs a new oracle golden at
-   `c1d0e44` + the default-no-op/thread-invariant discipline.
+   ✅ #1 print EV-compensation + `normalize_print_exposure` — FIXED (#80).
+   ✅ (a) highlight-boost stage — WIRED (`test_highlight_boost_e2e`).
+   ✅ (c) spatial-effects per-effect gating — FIXED (E1, `test_spatial_decouple_e2e`).
+   ✅ (d) print-route grain/spatial — FIXED (E2, `test_print_spatial_e2e`).
+   ✅ (e) DIR-gamma / enlarger-lens-blur / glare disclosure — DONE (F7).
+   Remaining: **(b) 🔴 MALLETT2019 — implement-vs-remove decision** (see §A; scheduled as
+   `PRIORITY_ROADMAP` #18). Any engine fix needs a new oracle golden at `c1d0e44` + the
+   default-no-op/thread-invariant discipline.
 4. **Instrumented (`androidTest`) coverage** for the JNI/marshalling + export-quantisation paths the
    JVM tests can't reach (needs a device/Robolectric).
 5. Maintainer/device items: the R8 release-build on-device smoke is **DONE** (2026-06-04, see §D —

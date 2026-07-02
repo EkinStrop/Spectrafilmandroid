@@ -24,6 +24,13 @@ else is parity-safe Tier 0/1/2/4.** File:line references were captured against t
 treat exact line numbers as approximate and re-verify at implementation time (function/file names are
 stable).
 
+**STATUS 2026-07-02: Waves 0-2 largely shipped** — WB wave (CreativeWhiteBalance/FilmStockBalance,
+gray-point eyedropper, AE default ON), masking v1 (linear/radial + luminance/color range, 13 local
+ops incl Class-S spatial, overlay + eyedroppers — see MASKING_SPEC.md), engine opt-in gamut
+compression (output aces_rgc + input xy), stage memos (film-density both routes + print-density) +
+retained-result grade cache, DNG-detect fix (SourceDetect.kt). Open: perceptual gamut algos (next),
+brush/AI masks, AVIF, B&W/K-25.
+
 ---
 
 ## The user-problem catalog (ranked)
@@ -55,7 +62,9 @@ transform applied to the input buffer before `simulate()` is outside the parity 
 feed fixed buffers straight into C++; they never exercise a pre-multiply). That makes creative WB a
 provably parity-safe **Tier 1** op.
 
-**Solutions (all parity-free unless noted):**
+**Solutions (all parity-free unless noted):** *(items 1–5 ✅ SHIPPED as the WB wave — shipped as
+`CreativeWhiteBalance.kt` / `FilmStockBalance.kt` + the gray-point eyedropper, not the proposed
+`WhiteBalance.kt`.)*
 1. **Creative all-sources Temp/Tint** (Tier 1, **M**). New `WhiteBalance.kt` + `ImagePipeline.applyCreativeWb`
    on the linear input buffer **before** `simulate`, into a *fresh* buffer (never mutate the cached
    source). Math: Temp/Tint → source whitepoint (reuse the engine's already-shipped
@@ -116,8 +125,10 @@ cyan as dye channels saturate (upstream-confirmed) — a boundary compressor *ma
   `ach=max(R,G,B)`) as a "Gamut compression" amount slider (0=off → byte-identical) in Output, folded
   into `ColorGrade`'s shared CCTF pass. **Honest caveat:** it runs on the engine's already-clipped
   output buffer, so it *softens* the harsh cyan/edge fringe (pulls the most-saturated colors toward
-  neutral) rather than fully curing it — the true **pre-clip** cure is the Tier-3 engine change (P3
-  below), still deferred. `GamutCompressTest` (8). Remaining polish: expose THR/LIM adjustable + a
+  neutral) rather than fully curing it — the engine-side opt-in pass has since shipped (output aces_rgc
+  pre-CCTF + input xy locus bake, gates `gamut_out_aces`/`gamut_in_xy`); the perceptual algos
+  (cam16ucs/oklch/oklrab/jzazbz) are the next task, and the P3 channel-crosstalk cure remains an
+  upstream-coordinated research item. `GamutCompressTest` (8). Remaining polish: expose THR/LIM adjustable + a
   target-gamut selector; move the pass pre-clip (needs the engine, P3). **This is the "users want ACES
   RGC built in" feature** (v1).
 - **P2 — hue-preserving soft clip** (Oklab cusp projection, Ottosson α≈0.05) replacing the hard clip
@@ -218,6 +229,11 @@ century".
 
 ## §4 — Local editing / masking (+ AI selection)  ✅ synthesized
 
+> **SUPERSEDED by docs/MASKING_SPEC.md (the authoritative spec)** — masking v1 SHIPPED
+> (linear/radial + luminance/color range, 13 local ops incl Class-S spatial, draw-on-preview
+> overlay, eyedroppers). Kept for the original problem framing; brush + AI Subject/Sky + XMP
+> export remain open.
+
 **Load-bearing fact:** every render path (preview-settle, live-draft, zoom-ROI, magnifier, **export**)
 funnels the engine's float output through **one function — `simResultToBitmap` in `EngineHelpers.kt`**
 (interleaved float32 RGB, pre-8-bit-clamp). That single seam is where Tier-A masking inserts → it's
@@ -266,13 +282,13 @@ labels; Snapseed on-device segmentation.
 
 **Hotspot:** the per-pixel 81-band expose integrals in `filming`+`printing` (and `scan`). **Policy:
 approximate proxy / exact export** — GPU/approximation is preview-only; export always runs the exact
-CPU path, so the 26-test parity gate is never touched. Levers ranked by speed-per-effort:
+CPU path, so the engine-parity gate (33 tests as of 2026-07-02) is never touched. Levers ranked by speed-per-effort:
 
 | Lever | What | Tier/where | Speedup | Effort | Parity |
 |---|---|---|---|---|---|
 | **E** Pause render on gesture | Suppress preview render during pan/pinch; resume on settle (the `collectLatest` flow already cancels) | Kotlin `Viewer`/`ImagePipeline` | instant feel | **S** | exact |
 | **B** 3D-LUT preview loupe | Bake the pointwise pipeline to a 33³ `.cube`, GLES samples it per frame (<1ms); bake on settle, show last LUT meanwhile (scaffolding exists) | Kotlin `LutGpuPreview`/`Viewer` | ~0 ms/drag | **S–M** | preview-only |
-| **D** Stage caches | Cache `film_density`/`print_density`; rerun only the changed stage (output-space/scan edits skip stages 1–2) | C++ `spektra.cpp` per-instance | 2–8× common edits | **M** | **exact** (caches exact values) |
+| **D** Stage caches ✅ SHIPPED | S1 film-density memo (both routes) + S2 print-density memo + S3 Kotlin grade cache — measured warm print edits 153–162 ms vs 402 ms cold at 512² | C++ `spektra.cpp` per-instance + Kotlin | 2–8× common edits | **M** | **exact** (caches exact values) |
 | **C** fp16/float32 preview buffers | Preview-only flag; float32 accumulators + fp16 inter-stage buffers (kernels exist, CI-gated) | C++ `filming/printing/scanning`, default off | ~1.5–2× | **M** | none (off by default) |
 | **infra** Persistent Vulkan ctx | `vulkan_compute.cpp` currently rebuilds device+pipeline **per call** (kills any GPU win); add a persistent `VkContext` + on-disk `VkPipelineCache` | C++ `gpu/` | prerequisite for A | S–M | n/a |
 | **A** Fused GPU compute kernel | Port the fused filming→print→scan per-pixel integral to a Vulkan compute shader (the scan shader exists; filming+print shaders missing) | C++ `gpu/`, `AppSettings` flag | **15–50×** preview | **L** | preview-only |
@@ -291,7 +307,7 @@ the fused-compute path (A) is the real ceiling.
 
 Almost all of this is Tier 0/2/4 (no engine change). Two **immediate bug-fixes** surfaced:
 
-- **🐞 DNG detection bug** — `MainActivity.kt:571` reads `RawDecoder.isRawFileName(name) || true`: the
+- ✅ FIXED (SourceDetect.kt content-based detection) **🐞 DNG detection bug** — `MainActivity.kt:571` reads `RawDecoder.isRawFileName(name) || true`: the
   `|| true` force-treats **every picked file as RAW** (a workaround for MIUI document URIs with no
   extension). Fix: detect via `ContentResolver.getType()` (DNG = `image/x-adobe-dng`) **with** the
   filename fallback, drop `|| true`, and filter the `OpenDocument` MIME list. Tier 0, **S**, parity none.

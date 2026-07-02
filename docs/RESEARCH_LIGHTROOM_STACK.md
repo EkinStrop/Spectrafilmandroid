@@ -40,9 +40,9 @@ Ranked by value/effort. Evidence = the symbols/libs each is grounded in.
 3. **Tiled full-res export** — `cr_cpu_const_tile_buffer` / `cr_cpu_dirty_tile_buffer`. Render
    the export in bounded-memory tiles so 50–200 MP files export without a full-frame transient.
    Closes the remaining half of issue #7 (the proxy decode already fixed *preview*). *Large, native.*
-4. **Per-stage intermediate caches** — the huge `cr_*_cache` family (tone-map, mask, stats…).
-   We recompute the whole pipeline on every param change; caching upstream stages so only the
-   changed stage re-runs would cut preview latency a lot. *Med.*
+4. ✅ **SHIPPED** — **Per-stage intermediate caches** — the huge `cr_*_cache` family (tone-map,
+   mask, stats…). Landed as the S1/S2 engine stage memos + S3 Kotlin grade cache (warm print
+   edits ~153–162 ms vs 402 ms cold at 512²).
 5. **Pause/refresh render on gesture** — `ICBPauseRendering`/`ICBRefreshRendering`. Skip
    rendering mid-drag, render once on release. Cheap, immediate smoothness win. *Small.*
 6. **Embedded-JPEG instant preview** — `ICBGetAndReleasePreviewJpegBytes` / LibRaw

@@ -1,5 +1,9 @@
 # Porting Plan — spektrafilm (Python) → spektra-core (C++/Kotlin)
 
+> **STATUS 2026-07-02: DONE** — the full engine is ported and parity-gated (33 host gates, see
+> CLAUDE.md / ci.yml). Kept as the historical porting map; for current state see docs/AUDIT.md +
+> HANDOFF.md.
+
 This maps every spektrafilm module to its Android target, with effort and strategy. LOC are
 approximate (from the source map). "→ C++" means it becomes part of `libspektra.so`; "→ Kotlin"
 means it lives in the JVM facade; "→ asset" means data shipped in `assets/spektra/`.
@@ -86,7 +90,7 @@ SpektraParams(...)  // 1:1 with RuntimePhotoParams (camera/enlarger/scanner/film
 
 ## Skipped for v1
 
-- `spektrafilm_gui/` (napari/Qt desktop GUI) — replaced by `feature:film-emulation` Compose UI.
+- `spektrafilm_gui/` (napari/Qt desktop GUI) — replaced by the standalone `:app` Compose UI (the `feature:film-emulation` module referenced by early plans is not built — see CLAUDE.md).
 - `utils/plotting.py`, `model/parametric.py`, `model/stocks.py`, `utils/calibration_targets.py`.
 - `lensfunpy` lens correction (unused upstream).
 

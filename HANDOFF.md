@@ -1,6 +1,37 @@
 # Spektrafilm Android — Session Handoff
 
-## State (2026-07-02, LATEST, branch `claude/exciting-hamilton-hya62`) — PM "exact + fast" pass COMPLETE (PR #109)
+## ▶ NEXT SESSION — START HERE (written 2026-07-02, post-#109-merge)
+
+**PR #109 is MERGED to `main` (`e0c3736`) and its branch was deleted.** The local
+`claude/exciting-hamilton-hya62` was restarted from `origin/main` (same name, fresh history —
+per protocol the next PR is a NEW PR; never stack on merged history). This handoff commit is
+the branch's first commit.
+
+**The user chose the next task: P2 #6 — perceptual output-gamut compression algos**
+(`cam16ucs` / `oklch` / `oklrab` / `jzazbz`, default-OFF, effort XL). Plan of record:
+- Hook: the existing `output_gamut_compress` path — `model/gamut_compression.{h,cpp}`
+  (`OutputGamutCompress` has RESERVED enum slots; `kLegacyClip` default, `kAcesRgc` shipped),
+  `scanning.cpp` gated call site, JNI `enum_ordinal_int` marshal,
+  `SpektraParams.IoParams.OutputGamutCompress`, dropdown under Simulation→Output. Adding an
+  algo = new enum value + new compress function + extend the same dropdown; recipes
+  round-trip by ordinal (old recipes → default, unchanged look).
+- Oracle: `spektrafilm/model/gamut_compression.py` (`compress_rgb` + colour-science
+  color-appearance conversions). The XL meat is porting CAM16-UCS / OKLCH / OKLrAB / JzAzBz
+  in float64 bit-matching colour-science. Gate the PRIMITIVES at function level (the pattern
+  #3/#5 used — one golden per algo, gen script under `tools/parity/`, oracle loaded via the
+  matplotlib-shim like `gen_gamut_in_golden.py`; gamut goldens were generated at oracle HEAD
+  `27bd085`, e2e param-wiring goldens stay pinned at `c1d0e44` — check `git -C
+  /home/user/spektrafilm log` and pin whatever SHA you generate at, in the gen script).
+- Default path must stay byte-identical: new algos are opt-in; the 33-gate suite must stay
+  green untouched; add the new gate(s) to ci.yml + CLAUDE.md/skill counts.
+- Verify per protocol: full suite (argv from ci.yml), `SPK_NUM_THREADS` 1≡8, NDK build,
+  commit+push each increment. Oracle env: see Context notes below (PYTHONPATH + /tmp/spkstubs).
+
+Everything below is the completed prior pass, kept for reference.
+
+---
+
+## State (2026-07-02, branch `claude/exciting-hamilton-hya62`) — PM "exact + fast" pass COMPLETE (PR #109, MERGED)
 
 The PM pass (*"we need spektrafilm exact result with ultra fast speed"*) is **fully landed and
 pushed**: Wave 1 (F1–F7 Kotlin fixes), Wave 2a (E1 spatial decouple, E2 print-route

@@ -320,6 +320,14 @@ void scan(const Profile& film, const ScanningParams& params,
     if (params.output_gamut_compress == OutputGamutCompress::kAcesRgc) {
         compress_rgb_aces_rgc(lin_rgb.data(), npix, params.gamut_knee_threshold,
                               params.gamut_knee_limit, params.gamut_knee_power);
+    } else if (params.output_gamut_compress == OutputGamutCompress::kOklch) {
+        // OkLch perceptual chroma reduction toward the output RGB cube. The
+        // spk_color_space enum (0..5) is exactly the golden's space_index, so the
+        // per-space RGB<->XYZ matrix + C_max table are selected by the raw index.
+        compress_rgb_oklch_chroma(lin_rgb.data(), npix,
+                                  static_cast<int>(params.output_color_space),
+                                  params.gamut_knee_threshold, params.gamut_knee_limit,
+                                  params.gamut_knee_power);
     }
 
     // Scanner lens blur (scanner.lens_blur, in pixels): a per-channel 2D Gaussian

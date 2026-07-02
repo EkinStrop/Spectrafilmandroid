@@ -8,14 +8,16 @@
  * version. See <https://www.gnu.org/licenses/>.
  *
  * Port of spektrafilm (GPLv3) by Andrea Volpato — film modeling powered by
- * spektrafilm. Ports utils/gamut_compression.py::reinhard_knee and
- * compress_rgb_aces_rgc. All math is in double precision to match the oracle
+ * spektrafilm. Ports utils/gamut_compression.py::reinhard_knee,
+ * compress_rgb_aces_rgc, and compress_rgb_oklch_chroma (the OkLch output-gamut
+ * chroma reduction). All math is in double precision to match the oracle
  * (NumPy float64); the knee uses std::pow, the same transcendental NumPy calls.
  */
 #include "model/gamut_compression.h"
 
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace spk {
 
@@ -204,6 +206,278 @@ void compress_xy_radial(double* xy, int npix, const double white_xy[2],
         double* q = xy + static_cast<long>(p) * 2;
         const double in[2] = {q[0], q[1]};
         compress_pixel_xy(in, white_xy, threshold, limit, power, q);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output-side: OkLch perceptual chroma reduction to the output RGB cube
+// (gamut_compression.py::compress_rgb_oklch_chroma + _build_polar_perceptual_c_max_table
+// + _c_max_lookup + _compress_lightness, specialised to algorithm=="oklch").
+// ---------------------------------------------------------------------------
+namespace {
+
+// π as the bit-exact double NumPy uses for np.pi (== M_PI); hex-literal so the h_grid
+// endpoints are byte-identical to np.linspace(-np.pi, np.pi, ...) regardless of platform
+// math.h ANSI guards.
+constexpr double kPi = 0x1.921fb54442d18p+1;
+
+// --- Oklab shared matrices (bit-exact hex, colour 0.4.7). vector_dot(M, v) == M @ v. ---
+// M1: XYZ -> LMS ; M2: LMS' -> OkLab. Inverses are colour's MATRIX_1_LMS_TO_XYZ /
+// MATRIX_2_LAB_TO_LMS, which equal np.linalg.inv(M1)/np.linalg.inv(M2) bit-for-bit.
+constexpr double kOklabM1[3][3] = {
+    {  0x1.a34b2ffffd19dp-1,  0x1.728d320078e3dp-2, -0x1.07e79a00e84a6p-3 },
+    {  0x1.0e359a0122b3cp-5,  0x1.dbcec3ffc10d5p-1,  0x1.281ae60381493p-5 },
+    {  0x1.8adb5bfc6d32ep-5,  0x1.0eb607ffccd61p-2,  0x1.4488360028552p-1 },
+};
+constexpr double kOklabM2[3][3] = {
+    {  0x1.af02a3fe8a4fap-3,  0x1.9655120032aadp-1, -0x1.0add9bd572b38p-8 },
+    {  0x1.fa5e1bfffde12p+0, -0x1.36dc1bffe5d3ep+1,  0x1.cd686fff371a5p-2 },
+    {  0x1.a869680b729e0p-6,  0x1.90c776001f502p-1, -0x1.9e0ac0001353dp-1 },
+};
+constexpr double kOklabM1Inv[3][3] = {  // LMS -> XYZ
+    {  0x1.3a1d946a3a87fp+0, -0x1.1d97f58537d01p-1,  0x1.20019ca670854p-2 },
+    { -0x1.4c6ecd6633e58p-5,  0x1.1cbcddbfc1706p+0, -0x1.259671ec13145p-4 },
+    { -0x1.38db94efa7dd7p-4, -0x1.af98f8c4a28d6p-2,  0x1.960ecaf5e947dp+0 },
+};
+constexpr double kOklabM2Inv[3][3] = {  // OkLab -> LMS'
+    {  0x1.fffffff2b0a82p-1,  0x1.95d992fe38807p-2,  0x1.b9f75219cc80fp-3 },
+    {  0x1.0000002625996p+0, -0x1.b0611710080c0p-4, -0x1.058bf485b8813p-4 },
+    {  0x1.000000ead0f39p+0, -0x1.6e86f739b7095p-4, -0x1.4a9ecbd4621c4p+0 },
+};
+
+// --- Per-output-space native RGB<->XYZ (illuminant = the space's OWN whitepoint, NO
+// chromatic adaptation to D65 — this is colour.RGB_to_XYZ / XYZ_to_RGB with
+// illuminant=cs.whitepoint & cctf off). Indexed by spk_color_space (0..5). Index 5
+// (LINEAR_SRGB) is byte-identical to index 0 (sRGB) because cctf is off. Bit-exact hex.
+constexpr double kRgbToXyz[6][3][3] = {
+    {  // [0] sRGB
+        {  0x1.a64c2f837b4a2p-2,  0x1.6e2eb1c432ca5p-2,  0x1.71a9fbe76c8b3p-3 },
+        {  0x1.b367a0f9096bcp-3,  0x1.6e2eb1c432ca5p-1,  0x1.27bb2fec56d5dp-4 },
+        {  0x1.3c36113404ea5p-6,  0x1.e83e425aee632p-4,  0x1.e6a7ef9db22d1p-1 },
+    },
+    {  // [1] Adobe RGB (1998)
+        {  0x1.27414a4d2b2c0p-1,  0x1.7c06e19b90ea9p-3,  0x1.817ebaf102363p-3 },
+        {  0x1.3079e59f2ba9dp-2,  0x1.41355475a31a5p-1,  0x1.3463497b7414ap-4 },
+        {  0x1.badc0980b2420p-6,  0x1.218bd66277c46p-4,  0x1.fb90ea9e6eeb7p-1 },
+    },
+    {  // [2] ProPhoto RGB
+        {  0x1.986c226809d49p-1,  0x1.14e3bcd35a857p-3,  0x1.0068db8bac70fp-5  },
+        {  0x1.26e978d4fdf3bp-2,  0x1.6c7e28240b780p-1,  0x1.a36e2eb1c4333p-14 },
+        { -0x1.529d8bce9dd8dp-60, -0x1.7d26869097f3bp-61, 0x1.a6594af4f0d84p-1  },
+    },
+    {  // [3] ITU-R BT.2020
+        {  0x1.461f5d84c18dbp-1,  0x1.282ce83acff98p-3,  0x1.59de44c9f941ap-3 },
+        {  0x1.0d0148ccf66f1p-2,  0x1.5b22902fd967ep-1,  0x1.e5ccb69ab60a3p-5 },
+        {  0x1.c3f85a235493dp-55, 0x1.cbf168a39d522p-6,  0x1.0f9cb77c699aep+0 },
+    },
+    {  // [4] ACES2065-1
+        {  0x1.e7b4f2983be02p-1, -0x1.88f09f952796fp-56, 0x1.88eaa17e5206ap-14 },
+        {  0x1.6038bdb33fb82p-2,  0x1.74d22fc5e7ec9p-1, -0x1.277474fc3e450p-4  },
+        { -0x1.945c48566e5f4p-60, -0x1.2482d70c72d1ep-61, 0x1.02425e0661114p+0  },
+    },
+    {  // [5] LINEAR_SRGB (== [0])
+        {  0x1.a64c2f837b4a2p-2,  0x1.6e2eb1c432ca5p-2,  0x1.71a9fbe76c8b3p-3 },
+        {  0x1.b367a0f9096bcp-3,  0x1.6e2eb1c432ca5p-1,  0x1.27bb2fec56d5dp-4 },
+        {  0x1.3c36113404ea5p-6,  0x1.e83e425aee632p-4,  0x1.e6a7ef9db22d1p-1 },
+    },
+};
+constexpr double kXyzToRgb[6][3][3] = {
+    {  // [0] sRGB
+        {  0x1.9ecbfb15b573fp+1, -0x1.8985f06f69446p+0, -0x1.fe90ff9724746p-2 },
+        { -0x1.f013a92a30553p-1,  0x1.e0346dc5d6388p+0,  0x1.53f7ced916876p-5 },
+        {  0x1.c84b5dcc63f13p-5, -0x1.a1cac083126e9p-3,  0x1.0e978d4fdf3b6p+0 },
+    },
+    {  // [1] Adobe RGB (1998)
+        {  0x1.0552d234eb9a1p+1, -0x1.2148fd9fd36f9p-1, -0x1.6100e6afcce1dp-2 },
+        { -0x1.f04039abf3387p-1,  0x1.e03f91e646f15p+0,  0x1.5475a31a4bdbdp-5 },
+        {  0x1.b866e43aa79bap-7, -0x1.e4cd74927913fp-4,  0x1.03e22e5de15cap+0 },
+    },
+    {  // [2] ProPhoto RGB
+        {  0x1.589374bc6a7f0p+0, -0x1.05bc01a36e2ecp-2, -0x1.a29c779a6b50fp-5  },
+        { -0x1.16d5cfaacd9e8p-1,  0x1.8219652bd3c36p+0,  0x1.4fdf3b645a1cep-6  },
+        { -0x1.aab28f12ea173p-60, -0x1.e6fdffe5e01c0p-61, 0x1.36594af4f0d84p+0 },
+    },
+    {  // [3] ITU-R BT.2020
+        {  0x1.b77673c6f9e49p+0, -0x1.6c34f641d9636p-2, -0x1.03727351a2d1bp-2 },
+        { -0x1.5557a6bfc0412p-1,  0x1.9dd1b6ddf1d7cp+0,  0x1.025a1324e0e31p-6 },
+        {  0x1.2102ecb55b896p-6, -0x1.5e607a2582443p-5,  0x1.e25b571e54eebp-1 },
+    },
+    {  // [4] ACES2065-1
+        {  0x1.0cc06a33249a9p+0, -0x1.1b40fff904389p-55, -0x1.98e12f51c9fb9p-14 },
+        { -0x1.fbce0088cee1ap-2,  0x1.5f91719ae1931p+0,  0x1.926424e351582p-4  },
+        { -0x1.5ce4fb528d408p-60, -0x1.8e31f5b810833p-61, 0x1.fb85627086a78p-1  },
+    },
+    {  // [5] LINEAR_SRGB (== [0])
+        {  0x1.9ecbfb15b573fp+1, -0x1.8985f06f69446p+0, -0x1.fe90ff9724746p-2 },
+        { -0x1.f013a92a30553p-1,  0x1.e0346dc5d6388p+0,  0x1.53f7ced916876p-5 },
+        {  0x1.c84b5dcc63f13p-5, -0x1.a1cac083126e9p-3,  0x1.0e978d4fdf3b6p+0 },
+    },
+};
+
+// C_max table geometry (gamut_compression.py: _OKLCH_CMAX_TABLE_N_L / _N_H / _N_BISECT,
+// with the OUTPUT-side L grid linspace(0.02, 1.0, 64) from _get_output_c_max_table).
+constexpr int kOklchNL = 64;
+constexpr int kOklchNH = 720;
+constexpr int kOklchNBisect = 18;
+
+// colour.algebra.spow: sign-preserving power. Negative LMS occur for OOG/negative-XYZ
+// pixels, so the cube-root and cube must preserve sign (plain pow would NaN). spow(0)=0.
+inline double spow(double a, double p) {
+    if (a == 0.0) return 0.0;
+    return std::copysign(std::pow(std::fabs(a), p), a);
+}
+
+inline void mat3_mul(const double M[3][3], const double v[3], double out[3]) {
+    out[0] = M[0][0] * v[0] + M[0][1] * v[1] + M[0][2] * v[2];
+    out[1] = M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2];
+    out[2] = M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2];
+}
+
+// colour.XYZ_to_Oklab: LMS = M1 @ XYZ ; LMS' = spow(LMS, 1/3) ; OkLab = M2 @ LMS'.
+inline void oklab_from_xyz(const double xyz[3], double lab[3]) {
+    double lms[3];
+    mat3_mul(kOklabM1, xyz, lms);
+    const double lms_[3] = {spow(lms[0], 1.0 / 3.0), spow(lms[1], 1.0 / 3.0),
+                            spow(lms[2], 1.0 / 3.0)};
+    mat3_mul(kOklabM2, lms_, lab);
+}
+
+// colour.Oklab_to_XYZ: LMS' = M2inv @ OkLab ; LMS = spow(LMS', 3) ; XYZ = M1inv @ LMS.
+inline void xyz_from_oklab(const double lab[3], double xyz[3]) {
+    double lms_[3];
+    mat3_mul(kOklabM2Inv, lab, lms_);
+    const double lms[3] = {spow(lms_[0], 3.0), spow(lms_[1], 3.0), spow(lms_[2], 3.0)};
+    mat3_mul(kOklabM1Inv, lms, xyz);
+}
+
+// Build the (kOklchNL x kOklchNH) C_max(L,h) table for output `space`, plus its grids.
+// Ports _build_polar_perceptual_c_max_table for space=="oklch": L_grid=linspace(0.02,1,64)
+// (inclusive; endpoint pinned to exactly 1.0 as np.linspace does), h_grid=linspace(-π,π,
+// 720, endpoint=False), chroma upper 0.5, kOklchNBisect bisection iterations, in-gamut iff
+// every native-RGB channel is in [-1e-6, 1+1e-6], returning the lower bracket `lo`.
+void build_oklch_cmax_table(int space, double* table, double* L_grid, double* h_grid) {
+    // np.linspace(0.02, 1.0, 64): y = arange(64) * step + 0.02 ; y[-1] := 1.0.
+    const double Lstep = (1.0 - 0.02) / static_cast<double>(kOklchNL - 1);
+    for (int i = 0; i < kOklchNL; ++i)
+        L_grid[i] = static_cast<double>(i) * Lstep + 0.02;
+    L_grid[kOklchNL - 1] = 1.0;  // np.linspace endpoint override
+    // np.linspace(-π, π, 720, endpoint=False): step = 2π/720 ; y = arange(720)*step - π.
+    const double hstart = -kPi;
+    const double hstep = (kPi - (-kPi)) / static_cast<double>(kOklchNH);
+    for (int j = 0; j < kOklchNH; ++j)
+        h_grid[j] = static_cast<double>(j) * hstep + hstart;
+
+    const double(*M)[3] = kXyzToRgb[space];
+    for (int i = 0; i < kOklchNL; ++i) {
+        const double L = L_grid[i];
+        for (int j = 0; j < kOklchNH; ++j) {
+            // np.cos/np.sin(h_mesh) are constant across the bisection; hoist them.
+            const double ch = std::cos(h_grid[j]);
+            const double sh = std::sin(h_grid[j]);
+            double lo = 0.0;
+            double hi = 0.5;
+            for (int it = 0; it < kOklchNBisect; ++it) {
+                const double mid = (lo + hi) * 0.5;
+                const double lab[3] = {L, mid * ch, mid * sh};
+                double xyz[3];
+                xyz_from_oklab(lab, xyz);
+                double rgb[3];
+                mat3_mul(M, xyz, rgb);
+                const bool in_gamut =
+                    rgb[0] >= -1e-6 && rgb[0] <= 1.0 + 1e-6 &&
+                    rgb[1] >= -1e-6 && rgb[1] <= 1.0 + 1e-6 &&
+                    rgb[2] >= -1e-6 && rgb[2] <= 1.0 + 1e-6;
+                if (in_gamut) lo = mid; else hi = mid;
+            }
+            table[static_cast<size_t>(i) * kOklchNH + j] = lo;
+        }
+    }
+}
+
+// Bilinear C_max lookup with hue wrap (gamut_compression.py::_c_max_lookup). L is clipped
+// to the grid; h wraps mod kOklchNH (index 719 <-> 0). h_step and the L denominator are
+// taken from the stored grid values (not the analytic step) to match the oracle exactly.
+double cmax_lookup(double L, double h, const double* table, const double* L_grid,
+                   const double* h_grid) {
+    if (L < L_grid[0]) L = L_grid[0];
+    else if (L > L_grid[kOklchNL - 1]) L = L_grid[kOklchNL - 1];
+
+    const double h_step = h_grid[1] - h_grid[0];
+    const double h_idx = (h - h_grid[0]) / h_step;
+    const double h_floor = std::floor(h_idx);
+    int h_lo = static_cast<int>(h_floor);
+    h_lo = ((h_lo % kOklchNH) + kOklchNH) % kOklchNH;  // numpy floored modulo
+    const int h_hi = (h_lo + 1) % kOklchNH;
+    const double h_frac = h_idx - h_floor;
+
+    const double L_idx = (L - L_grid[0]) / (L_grid[kOklchNL - 1] - L_grid[0]) *
+                         static_cast<double>(kOklchNL - 1);
+    int L_lo = static_cast<int>(std::floor(L_idx));
+    if (L_lo < 0) L_lo = 0;
+    else if (L_lo > kOklchNL - 2) L_lo = kOklchNL - 2;
+    const int L_hi = L_lo + 1;
+    const double L_frac = L_idx - static_cast<double>(L_lo);
+
+    const double v00 = table[static_cast<size_t>(L_lo) * kOklchNH + h_lo];
+    const double v01 = table[static_cast<size_t>(L_lo) * kOklchNH + h_hi];
+    const double v10 = table[static_cast<size_t>(L_hi) * kOklchNH + h_lo];
+    const double v11 = table[static_cast<size_t>(L_hi) * kOklchNH + h_hi];
+    const double t0 = v00 * (1.0 - L_frac) * (1.0 - h_frac);
+    const double t1 = v01 * (1.0 - L_frac) * h_frac;
+    const double t2 = v10 * L_frac * (1.0 - h_frac);
+    const double t3 = v11 * L_frac * h_frac;
+    return t0 + t1 + t2 + t3;
+}
+
+// One linear-RGB triple -> compressed triple, given a prebuilt C_max table + grids for
+// `space`. Mirrors compress_rgb_oklch_chroma per pixel (with lightness_compression pinned
+// to (0.7,1.0,2.2), L_white=1). `out` may alias `rgb_in`.
+void compress_pixel_oklch(const double rgb_in[3], int space, const double* table,
+                          const double* L_grid, const double* h_grid, double threshold,
+                          double limit, double power, double out[3]) {
+    double xyz[3];
+    mat3_mul(kRgbToXyz[space], rgb_in, xyz);
+    double lab[3];
+    oklab_from_xyz(xyz, lab);
+    const double a = lab[1];
+    const double b = lab[2];
+
+    // _compress_lightness(L, (0.7,1.0,2.2), L_white=1.0): L/1 and *1 are exact no-ops,
+    // so this reduces to the one-sided reinhard knee on L. C_max lookup + reconstruction
+    // use this COMPRESSED L; C and h stay on the ORIGINAL a,b.
+    const double L = reinhard_knee(lab[0], 0.7, 1.0, 2.2);
+    const double C = std::hypot(a, b);
+    const double h = std::atan2(b, a);
+
+    const double C_max = cmax_lookup(L, h, table, L_grid, h_grid);
+    const double safe_C_max = std::fmax(C_max, 1e-9);
+    const double d_norm = C / safe_C_max;
+    const double d_comp = reinhard_knee(d_norm, threshold, limit, power);
+    const double C_new = d_comp * safe_C_max;
+
+    const double a_new = C_new * std::cos(h);
+    const double b_new = C_new * std::sin(h);
+    const double lab_new[3] = {L, a_new, b_new};
+    double xyz_new[3];
+    xyz_from_oklab(lab_new, xyz_new);
+    mat3_mul(kXyzToRgb[space], xyz_new, out);
+}
+
+}  // namespace
+
+void compress_rgb_oklch_chroma(double* rgb, int npix, int output_space, double threshold,
+                               double limit, double power) {
+    // Build the per-space C_max(L,h) table ONCE, locally (no static/global state ->
+    // thread-invariant and warm==cold). One build per image; this path is opt-in.
+    std::vector<double> table(static_cast<size_t>(kOklchNL) * kOklchNH);
+    double L_grid[kOklchNL];
+    double h_grid[kOklchNH];
+    build_oklch_cmax_table(output_space, table.data(), L_grid, h_grid);
+    for (int p = 0; p < npix; ++p) {
+        double* px = rgb + static_cast<long>(p) * 3;
+        const double in[3] = {px[0], px[1], px[2]};
+        compress_pixel_oklch(in, output_space, table.data(), L_grid, h_grid, threshold,
+                             limit, power, px);
     }
 }
 

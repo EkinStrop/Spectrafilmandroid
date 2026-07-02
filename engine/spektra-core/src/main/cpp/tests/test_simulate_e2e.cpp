@@ -50,6 +50,8 @@ extern uint64_t spk_test_film_cache_hits(spk_engine* eng);
 extern uint64_t spk_test_film_cache_misses(spk_engine* eng);
 extern uint64_t spk_test_scan_film_cache_hits(spk_engine* eng);
 extern uint64_t spk_test_scan_film_cache_misses(spk_engine* eng);
+extern uint64_t spk_test_print_density_cache_hits(spk_engine* eng);
+extern uint64_t spk_test_print_density_cache_misses(spk_engine* eng);
 
 namespace {
 
@@ -602,6 +604,63 @@ int main(int argc, char** argv) {
                         (unsigned long long)gmiss0, (unsigned long long)gmiss1,
                         gbypass_ok ? "PASS" : "FAIL");
             pass_film_cache = pass_film_cache && big && gbypass_ok;
+        }
+
+        // Scenario F (PRINT-DENSITY memo): print_expose+print_develop memoize on
+        // the film_density_cmy CONTENT + printing inputs. Assert: output-only
+        // edit HITs (scan() alone reruns); print-side edit MISSes; and — the
+        // content-hash property — grain-on repeats HIT even though the FILM memo
+        // bypasses (seeded grain produces identical film bytes).
+        {
+            auto pd_hits = [&]() { return spk_test_print_density_cache_hits(eng); };
+            auto pd_miss = [&]() { return spk_test_print_density_cache_misses(eng); };
+
+            // Warm the print-density slot with a distinct print base.
+            spk_params pp = make_p0();
+            pp.print_exposure = 1.11f;  // unique: this scenario owns the slot
+            {
+                spk_image w{};
+                if (spk_simulate(eng, &in_img, &pp, &w) == SPK_OK && w.data) spk_image_free(&w);
+            }
+
+            // Output-only edit -> print-density HIT (only scan() reruns).
+            spk_params po = pp;
+            po.output_color_space = SPK_CS_ADOBE_RGB;
+            uint64_t h0 = pd_hits();
+            bool bio = print_byte_identical("print_density F: output-only edit", &po);
+            bool ohit_ok = (pd_hits() > h0);
+            std::printf("[print_density F: output-only cache-hit] hits %llu->%llu -> %s\n",
+                        (unsigned long long)h0, (unsigned long long)pd_hits(),
+                        ohit_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && bio && ohit_ok;
+
+            // Print-side edit -> print-density MISS (film memo still HITs).
+            spk_params py = pp;
+            py.y_filter_shift = 0.07f;
+            uint64_t m0 = pd_miss();
+            bool biy = print_byte_identical("print_density F: y_filter_shift edit", &py);
+            bool ymiss_ok = (pd_miss() > m0);
+            std::printf("[print_density F: print-side cache-miss] misses %llu->%llu -> %s\n",
+                        (unsigned long long)m0, (unsigned long long)pd_miss(),
+                        ymiss_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && biy && ymiss_ok;
+
+            // CONTENT-HASH property: with grain ON the FILM memo bypasses, but the
+            // seeded grain reproduces identical film bytes, so an identical repeat
+            // must HIT the print-density memo.
+            spk_params pg = pp;
+            pg.grain_active = 1;
+            {
+                spk_image w{};
+                if (spk_simulate(eng, &in_img, &pg, &w) == SPK_OK && w.data) spk_image_free(&w);
+            }
+            uint64_t g0 = pd_hits();
+            bool big2 = print_byte_identical("print_density F: grain repeat", &pg);
+            bool ghit_ok = (pd_hits() > g0);
+            std::printf("[print_density F: grain repeat content-hash hit] hits %llu->%llu -> %s\n",
+                        (unsigned long long)g0, (unsigned long long)pd_hits(),
+                        ghit_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && big2 && ghit_ok;
         }
     }
 

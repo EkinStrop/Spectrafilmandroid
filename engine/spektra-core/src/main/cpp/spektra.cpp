@@ -210,6 +210,15 @@ struct spk_engine {
     enum FilmMemoRoute { kMemoPrint = 0, kMemoScan = 1 };
     std::mutex film_cache_mutex;
     FilmMemoSlot film_memo[2];
+
+    // PRINT-DENSITY (print_expose + print_develop) memo, keyed by the
+    // film_density_cmy buffer CONTENT + every printing-stage input
+    // (compute_print_density_key). Content-hashing makes it correct
+    // independently of the film memo (grain or a film bypass included: both
+    // print stages are deterministic functions of film bytes + params). Lets an
+    // output-only edit (scanner / output space / tone curve / glare) rerun
+    // scan() alone. The entry buffer holds print_density_cmy. Same mutex.
+    FilmMemoSlot print_density_memo;
 };
 
 // Host-only accessors for the print-route film_density_cmy cache counters. The host
@@ -239,6 +248,16 @@ uint64_t spk_test_scan_film_cache_misses(spk_engine* eng) {
     if (!eng) return 0;
     std::lock_guard<std::mutex> g(eng->film_cache_mutex);
     return eng->film_memo[spk_engine::kMemoScan].misses;
+}
+uint64_t spk_test_print_density_cache_hits(spk_engine* eng) {
+    if (!eng) return 0;
+    std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+    return eng->print_density_memo.hits;
+}
+uint64_t spk_test_print_density_cache_misses(spk_engine* eng) {
+    if (!eng) return 0;
+    std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+    return eng->print_density_memo.misses;
 }
 #endif
 
@@ -545,6 +564,105 @@ static uint64_t compute_film_cache_key(const std::vector<double>& rgb, int width
     h = fnv1a64(h, &p->camera_diffusion_active, sizeof(p->camera_diffusion_active));
     h = fnv1a64(h, &p->lens_blur_um, sizeof(p->lens_blur_um));
     h = fnv1a64(h, &p->auto_exposure, sizeof(p->auto_exposure));
+    return h;
+}
+
+// Compute the print-density (print_expose + print_develop) memo key. Keyed by
+// the film_density_cmy buffer CONTENT — not by how it was produced — so this
+// memo is correct independently of the film memo's key completeness (grain, a
+// film-memo bypass, anything: identical film bytes + identical printing inputs
+// => byte-identical print_density_cmy, both stages being deterministic). Folds
+// every input the printing stage consumes AFTER film density exists:
+// profiles (enlarger illuminant/paper curves + the film-derived midgray), the
+// dichroic neutral CC + shifts, print gamma/exposure/midgray toggles, the s023
+// morph set, the preflash trio, the enlarger LUT settings, the enlarger
+// diffusion filter (+ the µm->px scale), and the print-route b/w correction
+// inputs (they set pparams.bw_exposure_correction inside print_expose).
+static uint64_t compute_print_density_key(const std::vector<float>& film_density_cmy,
+                                          int width, int height,
+                                          const spk_params* p,
+                                          double resize_pixel_size_um) {
+    uint64_t h = 0xcbf29ce484222325ULL;  // FNV offset basis
+    h = fnv1a64(h, film_density_cmy.data(),
+                film_density_cmy.size() * sizeof(float));
+    h = fnv1a64(h, &width, sizeof(width));
+    h = fnv1a64(h, &height, sizeof(height));
+    if (p->film_profile) h = fnv1a64(h, p->film_profile, std::strlen(p->film_profile));
+    if (p->print_profile) h = fnv1a64(h, p->print_profile, std::strlen(p->print_profile));
+    // tc_lut shape (engine_tc_lut key inputs): the midgray exposure factor inside
+    // print_expose is computed FROM the tc_lut directly — not through the film
+    // bytes — so these film-side params are genuine printing-stage inputs and
+    // must not alias across the content hash.
+    h = fnv1a64(h, &p->spectral_gaussian_blur, sizeof(p->spectral_gaussian_blur));
+    h = fnv1a64(h, &p->apply_hanatos_window, sizeof(p->apply_hanatos_window));
+    h = fnv1a64(h, &p->apply_hanatos_surface, sizeof(p->apply_hanatos_surface));
+    h = fnv1a64(h, p->camera_filter_uv, sizeof(p->camera_filter_uv));
+    h = fnv1a64(h, p->camera_filter_ir, sizeof(p->camera_filter_ir));
+    h = fnv1a64(h, &p->input_gamut_compress, sizeof(p->input_gamut_compress));
+    // Dichroic neutral CC (database flag + explicit values) + user shifts.
+    h = fnv1a64(h, &p->neutral_print_filters_from_database,
+                sizeof(p->neutral_print_filters_from_database));
+    h = fnv1a64(h, &p->c_filter_neutral, sizeof(p->c_filter_neutral));
+    h = fnv1a64(h, &p->m_filter_neutral, sizeof(p->m_filter_neutral));
+    h = fnv1a64(h, &p->y_filter_neutral, sizeof(p->y_filter_neutral));
+    h = fnv1a64(h, &p->m_filter_shift, sizeof(p->m_filter_shift));
+    h = fnv1a64(h, &p->y_filter_shift, sizeof(p->y_filter_shift));
+    // Print gamma / exposure / midgray balance.
+    h = fnv1a64(h, &p->print_density_curve_gamma, sizeof(p->print_density_curve_gamma));
+    h = fnv1a64(h, &p->exposure_compensation_ev, sizeof(p->exposure_compensation_ev));
+    h = fnv1a64(h, &p->normalize_print_exposure, sizeof(p->normalize_print_exposure));
+    h = fnv1a64(h, &p->print_exposure_compensation,
+                sizeof(p->print_exposure_compensation));
+    h = fnv1a64(h, &p->print_exposure, sizeof(p->print_exposure));
+    // s023 print density-curve morph (consumed in print_develop).
+    h = fnv1a64(h, &p->print_morph_active, sizeof(p->print_morph_active));
+    h = fnv1a64(h, &p->print_morph_gamma_factor, sizeof(p->print_morph_gamma_factor));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_fast,
+                sizeof(p->print_morph_gamma_factor_fast));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_slow,
+                sizeof(p->print_morph_gamma_factor_slow));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_red,
+                sizeof(p->print_morph_gamma_factor_red));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_green,
+                sizeof(p->print_morph_gamma_factor_green));
+    h = fnv1a64(h, &p->print_morph_gamma_factor_blue,
+                sizeof(p->print_morph_gamma_factor_blue));
+    h = fnv1a64(h, &p->print_morph_developer_exhaustion,
+                sizeof(p->print_morph_developer_exhaustion));
+    // Enlarger preflash.
+    h = fnv1a64(h, &p->preflash_exposure, sizeof(p->preflash_exposure));
+    h = fnv1a64(h, &p->preflash_m_filter_shift, sizeof(p->preflash_m_filter_shift));
+    h = fnv1a64(h, &p->preflash_y_filter_shift, sizeof(p->preflash_y_filter_shift));
+    // Opt-in enlarger 3D-LUT acceleration (changes the print_expose path).
+    h = fnv1a64(h, &p->use_enlarger_lut, sizeof(p->use_enlarger_lut));
+    h = fnv1a64(h, &p->lut_resolution, sizeof(p->lut_resolution));
+    h = fnv1a64(h, p->grain_density_min, sizeof(p->grain_density_min));
+    // Enlarger optical diffusion filter (print_expose spatial pass) + µm->px.
+    h = fnv1a64(h, &p->enlarger_diffusion_active, sizeof(p->enlarger_diffusion_active));
+    h = fnv1a64(h, &p->enlarger_diffusion_strength,
+                sizeof(p->enlarger_diffusion_strength));
+    h = fnv1a64(h, &p->enlarger_diffusion_spatial_scale,
+                sizeof(p->enlarger_diffusion_spatial_scale));
+    h = fnv1a64(h, &p->enlarger_diffusion_halo_warmth,
+                sizeof(p->enlarger_diffusion_halo_warmth));
+    h = fnv1a64(h, &p->enlarger_diffusion_core_intensity,
+                sizeof(p->enlarger_diffusion_core_intensity));
+    h = fnv1a64(h, &p->enlarger_diffusion_core_size,
+                sizeof(p->enlarger_diffusion_core_size));
+    h = fnv1a64(h, &p->enlarger_diffusion_halo_intensity,
+                sizeof(p->enlarger_diffusion_halo_intensity));
+    h = fnv1a64(h, &p->enlarger_diffusion_halo_size,
+                sizeof(p->enlarger_diffusion_halo_size));
+    h = fnv1a64(h, &p->enlarger_diffusion_bloom_intensity,
+                sizeof(p->enlarger_diffusion_bloom_intensity));
+    h = fnv1a64(h, &p->enlarger_diffusion_bloom_size,
+                sizeof(p->enlarger_diffusion_bloom_size));
+    h = fnv1a64(h, &resize_pixel_size_um, sizeof(resize_pixel_size_um));
+    // Print-route b/w correction inputs (drive pparams.bw_exposure_correction).
+    h = fnv1a64(h, &p->scanner_white_correction, sizeof(p->scanner_white_correction));
+    h = fnv1a64(h, &p->scanner_black_correction, sizeof(p->scanner_black_correction));
+    h = fnv1a64(h, &p->scanner_white_level, sizeof(p->scanner_white_level));
+    h = fnv1a64(h, &p->scanner_black_level, sizeof(p->scanner_black_level));
     return h;
 }
 
@@ -1266,13 +1384,46 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     }
     if (tap_film_density_cmy) *tap_film_density_cmy = film_density_cmy;
 
-    // 4) Printing stage (film density -> enlarger expose -> print develop).
-    std::vector<float> print_log_raw(static_cast<size_t>(npix) * 3);
-    spk::print_expose(film, prnt, pparams, film_density_cmy.data(), width, height,
-                      print_log_raw.data());
+    // 4) Printing stage (film density -> enlarger expose -> print develop),
+    //    memoized on the film_density_cmy CONTENT + every printing input (see
+    //    compute_print_density_key). An output-only edit (scanner/output space/
+    //    tone curve/glare) therefore reruns scan() alone. Debug-tap renders
+    //    bypass, keeping the tap path byte-identical to a plain recompute.
     std::vector<float> print_density_cmy(static_cast<size_t>(npix) * 3);
-    spk::print_develop(prnt, pparams, print_log_raw.data(), npix,
-                       print_density_cmy.data());
+    const bool pd_tap_bypass = tap_bypass || (tap_print_density_cmy != nullptr);
+    bool pd_hit = false;
+    if (!pd_tap_bypass) {
+        const uint64_t pd_key = compute_print_density_key(
+            film_density_cmy, width, height, p, resize_pixel_size_um);
+        std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+        auto& slot = eng->print_density_memo;
+        if (slot.valid && slot.key == pd_key &&
+            slot.entry.width == width && slot.entry.height == height &&
+            slot.entry.film_density_cmy.size() == print_density_cmy.size()) {
+            print_density_cmy = slot.entry.film_density_cmy;  // holds print density
+            ++slot.hits;
+            pd_hit = true;
+        }
+    }
+    if (!pd_hit) {
+        std::vector<float> print_log_raw(static_cast<size_t>(npix) * 3);
+        spk::print_expose(film, prnt, pparams, film_density_cmy.data(), width, height,
+                          print_log_raw.data());
+        spk::print_develop(prnt, pparams, print_log_raw.data(), npix,
+                           print_density_cmy.data());
+        if (!pd_tap_bypass) {
+            const uint64_t pd_key = compute_print_density_key(
+                film_density_cmy, width, height, p, resize_pixel_size_um);
+            std::lock_guard<std::mutex> g(eng->film_cache_mutex);
+            auto& slot = eng->print_density_memo;
+            slot.entry.width = width;
+            slot.entry.height = height;
+            slot.entry.film_density_cmy = print_density_cmy;  // holds print density
+            slot.key = pd_key;
+            slot.valid = true;
+            ++slot.misses;
+        }
+    }
     if (tap_print_density_cmy) *tap_print_density_cmy = print_density_cmy;
 
     if (!final_rgb) return SPK_OK;  // caller only wanted an earlier tap

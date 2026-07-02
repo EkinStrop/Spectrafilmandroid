@@ -61,6 +61,20 @@ object Recipes {
         state: ParamsState,
         sourceName: String,
         rotationDegrees: Int = 0,
+    ) = saveJson(ctx, key, Presets.toJsonString(state), sourceName, rotationDegrees)
+
+    /**
+     * Save/update the recipe for [key] from a PRE-SERIALIZED params payload
+     * ([Presets.toJsonString]). Serializing reads live Compose [ParamsState] field-by-field
+     * and must happen on the main thread; this overload takes the finished string so only
+     * the envelope build + file write cross to IO — avoiding a torn off-thread snapshot.
+     */
+    fun saveJson(
+        ctx: Context,
+        key: String,
+        paramsJson: String,
+        sourceName: String,
+        rotationDegrees: Int = 0,
     ) {
         val envelope = JSONObject().apply {
             put("recipeVersion", RECIPE_VERSION)
@@ -71,7 +85,7 @@ object Recipes {
             // params. NOT the EXIF baseline, which is derived fresh on every load.
             put("manualRotationDeg", rotationDegrees)
             // Params payload uses the shared preset schema verbatim.
-            put("params", Presets.encode(state))
+            put("params", JSONObject(paramsJson))
         }
         file(ctx, key).writeText(envelope.toString(2))
     }

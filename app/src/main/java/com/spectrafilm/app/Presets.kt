@@ -77,8 +77,17 @@ object Presets {
 
     /** Export the current [state] to a SAF [uri]. */
     fun export(ctx: Context, uri: Uri, state: ParamsState) {
+        exportJson(ctx, uri, toJsonString(state))
+    }
+
+    /**
+     * Export a PRE-SERIALIZED preset [json] (from [toJsonString]) to a SAF [uri] — the IO
+     * half of [export]. Serialize on the main thread, cross only the write to IO (same
+     * torn-snapshot rationale as [saveJson]).
+     */
+    fun exportJson(ctx: Context, uri: Uri, json: String) {
         ctx.contentResolver.openOutputStream(uri)?.use {
-            it.write(toJson(state).toString(2).toByteArray())
+            it.write(json.toByteArray())
         } ?: error("Could not open output for preset")
     }
 

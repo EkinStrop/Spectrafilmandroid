@@ -649,7 +649,10 @@ class MainActivity : ComponentActivity() {
         ) { uri ->
             if (uri != null) {
                 scope.launch {
-                    val r = withContext(Dispatchers.IO) { runCatching { Presets.export(ctx, uri, state) } }
+                    // Serialize on main (live Compose-state read); write off-main.
+                    val json = runCatching { Presets.toJsonString(state) }.getOrNull()
+                    if (json == null) { status = "export failed"; return@launch }
+                    val r = withContext(Dispatchers.IO) { runCatching { Presets.exportJson(ctx, uri, json) } }
                     r.onSuccess { status = "preset exported" }
                         .onFailure { status = "export failed: ${it.message}" }
                 }
@@ -1100,15 +1103,19 @@ class MainActivity : ComponentActivity() {
             // A non-NONE manual rotation is itself an edit worth persisting, even when the
             // params are otherwise default — so only treat as "pristine" if rotation is NONE.
             if (current != null && current == defaultsJson && rotation == SourceRotation.NONE) {
-                if (Recipes.exists(ctx, recipeKey)) {
-                    withContext(Dispatchers.IO) { Recipes.delete(ctx, recipeKey) }
+                // exists() is a file stat — keep it off main with the delete.
+                withContext(Dispatchers.IO) {
+                    if (Recipes.exists(ctx, recipeKey)) Recipes.delete(ctx, recipeKey)
                 }
                 hasRecipe = false
                 return@LaunchedEffect
             }
             runCatching {
+                // Reuse the main-thread serialization from above (torn-snapshot safety);
+                // only the envelope build + file write cross to IO.
+                val paramsJson = current ?: Presets.toJsonString(state)
                 withContext(Dispatchers.IO) {
-                    Recipes.save(ctx, recipeKey, state, sourceName, rotation.degrees)
+                    Recipes.saveJson(ctx, recipeKey, paramsJson, sourceName, rotation.degrees)
                 }
             }.onSuccess { hasRecipe = true }
         }
@@ -1345,11 +1352,13 @@ class MainActivity : ComponentActivity() {
                                 onSave = {
                                     if (presetName.isNotBlank()) {
                                         val name = presetName
-                                        // File write + listing off the main thread; the
-                                        // presetList/status state writes stay on main.
+                                        // Serialize on main (toJsonString reads live Compose
+                                        // state field-by-field — a torn snapshot off-main);
+                                        // only the file write + listing cross to IO.
                                         scope.launch {
+                                            val json = Presets.toJsonString(state)
                                             val names = withContext(Dispatchers.IO) {
-                                                Presets.save(ctx, name, state); Presets.list(ctx)
+                                                Presets.saveJson(ctx, name, json); Presets.list(ctx)
                                             }
                                             presetList = names
                                             status = "saved preset '$name'"
@@ -3138,18 +3147,20 @@ class MainActivity : ComponentActivity() {
                 tooltip = "Cross-layer (off-diagonal) inhibition — how much each dye layer bleeds into the others.", default = PARAM_DEFAULTS.couplersInhibitionInterlayer)
             AdvancedToggle(advanced) { advanced = it }
             if (advanced) {
-                TripleSlider("Within-layer curve (R, G, B)", s.couplersGammaSamelayer, 0f..2f, { s.couplersGammaSamelayer = it },
-                    step = 0.02f, decimals = 3, tooltip = "Per-channel same-layer DIR gamma (R, G, B).",
-                    default = PARAM_DEFAULTS.couplersGammaSamelayer)
-                PairSlider("Color mix R→G/B", s.couplersGammaRtoGb, 0f..2f, { s.couplersGammaRtoGb = it },
-                    step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from R onto G and B.",
-                    componentLabels = "→G" to "→B", default = PARAM_DEFAULTS.couplersGammaRtoGb)
-                PairSlider("Color mix G→R/B", s.couplersGammaGtoRb, 0f..2f, { s.couplersGammaGtoRb = it },
-                    step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from G onto R and B.",
-                    componentLabels = "→R" to "→B", default = PARAM_DEFAULTS.couplersGammaGtoRb)
-                PairSlider("Color mix B→R/G", s.couplersGammaBtoRg, 0f..2f, { s.couplersGammaBtoRg = it },
-                    step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from B onto R and G.",
-                    componentLabels = "→R" to "→G", default = PARAM_DEFAULTS.couplersGammaBtoRg)
+                GatedBlock("The DIR gamma matrix is set per film stock by the engine (each stock overwrites these) — adjusting them has no effect.") {
+                    TripleSlider("Within-layer curve (R, G, B)", s.couplersGammaSamelayer, 0f..2f, { s.couplersGammaSamelayer = it },
+                        step = 0.02f, decimals = 3, tooltip = "Per-channel same-layer DIR gamma (R, G, B).",
+                        default = PARAM_DEFAULTS.couplersGammaSamelayer)
+                    PairSlider("Color mix R→G/B", s.couplersGammaRtoGb, 0f..2f, { s.couplersGammaRtoGb = it },
+                        step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from R onto G and B.",
+                        componentLabels = "→G" to "→B", default = PARAM_DEFAULTS.couplersGammaRtoGb)
+                    PairSlider("Color mix G→R/B", s.couplersGammaGtoRb, 0f..2f, { s.couplersGammaGtoRb = it },
+                        step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from G onto R and B.",
+                        componentLabels = "→R" to "→B", default = PARAM_DEFAULTS.couplersGammaGtoRb)
+                    PairSlider("Color mix B→R/G", s.couplersGammaBtoRg, 0f..2f, { s.couplersGammaBtoRg = it },
+                        step = 0.02f, decimals = 3, tooltip = "Cross-channel DIR inhibition (a color-mixing matrix term): from B onto R and G.",
+                        componentLabels = "→R" to "→G", default = PARAM_DEFAULTS.couplersGammaBtoRg)
+                }
                 EnhancedSlider("Color bleed radius (µm)", s.couplersDiffusionSizeUm, 0f..100f, { s.couplersDiffusionSizeUm = it },
                     step = 5f, decimals = 1, tooltip = "Sigma in µm for the diffusion of the couplers (5-20 µm).", default = PARAM_DEFAULTS.couplersDiffusionSizeUm)
                 EnhancedSlider("Color bleed tail (µm)", s.couplersDiffusionTailUm, 0f..500f, { s.couplersDiffusionTailUm = it },
@@ -3166,6 +3177,12 @@ class MainActivity : ComponentActivity() {
         var expanded by remember { mutableStateOf(true) }
         SectionCard("Glare", expanded, { expanded = it }, enabledSwitch = s.glareActive,
             onEnabledChange = { s.glareActive = it }, help = ParamHelpText.forKey(ParamHelpText.GLARE)) {
+            // Live control, but only on one route — say so instead of dimming.
+            Text(
+                "Glare applies on the print route only (no effect in Slide mode / scan-film).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             EnhancedSlider("Percent", s.glarePercent, 0f..1f, { s.glarePercent = it },
                 step = 0.01f, decimals = 2, tooltip = "Percentage of the glare light (typically 0.1-0.25)", default = PARAM_DEFAULTS.glarePercent)
             EnhancedSlider("Roughness", s.glareRoughness, 0f..1f, { s.glareRoughness = it },

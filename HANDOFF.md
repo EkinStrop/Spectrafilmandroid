@@ -15,23 +15,40 @@
   Oklch(L, h) — Reinhard knee on `C / C_max`, `C_max` regenerated in-engine by a 64×720 bisection,
   float64 matrices from colour-science. Bit-exact to the oracle (gate `max_abs 1.077e-14`), gated
   by **`test_gamut_out_oklch`** (golden generated at oracle `27bd085`).
-- **Host parity suite = 34 gates**, all green (argv authoritative in `.github/workflows/ci.yml`);
-  `SPK_NUM_THREADS` 1≡8 byte-identical; NDK r27 3-ABI build green. App **0.8.0 / versionCode 10**.
-- **Local branch restarted clean from `origin/main`.** Per protocol the next PR is a NEW PR — never
-  stack on merged history. The remote branch auto-deletes on merge; recreate with a plain push.
+- **Oklrab perceptual output-gamut compression LANDED on this branch (P2 #6 slice 2) — NOT yet
+  merged.** Opt-in / default-OFF, byte-identical off. C++ `OutputGamutCompress::kOklrab=4` / facade
+  `OKLRAB` / UI "Oklrab (perceptual, even lightness)": the oklch chroma reduction with the per-pixel
+  `C_max` lookup indexed by Ottosson 2023's rebased lightness `Lr = f(L)` instead of raw `L` (and the
+  `C_max(Lr,h)` table built over an Lr grid, OkLab `L` recovered per row by the inverse remap before
+  `Oklab→XYZ`); reconstruction still preserves `L`. Bit-exact to the oracle (gate `max_abs 1.055e-14`
+  / probes `1.221e-15`), gated by **`test_gamut_out_oklrab`** (golden at oracle `27bd085`). Commits
+  `9cb0a0b` golden / `94d2274` engine+ci / `e1b75d8` app on `claude/exciting-hamilton-hya62`.
+- **Host parity suite = 35 gates**, all green (argv authoritative in `.github/workflows/ci.yml`);
+  `SPK_NUM_THREADS` 1≡8 byte-identical (oklrab compress is serial+stateless); NDK r27 3-ABI build
+  path unchanged. App **0.8.0 / versionCode 10**.
+- **This branch now carries the unmerged oklrab commits (slice 2) on top of `origin/main` + the
+  `1174fd8` docs commit.** Open a NEW draft PR for them; the remote branch auto-deletes on merge and
+  recreates with a plain push. Never stack new work on already-merged history.
 
-## Next — P2 #6 slice 2: `oklrab`
+## Next — P2 #6 slice 3: `jzazbz` (then slice 4 `cam16ucs`)
 
-Clone the merged `oklch` pattern; the templates are `tools/parity/gen_gamut_oklch_golden.py`,
-`model/gamut_compression.{h,cpp}`, and `tests/test_gamut_out_oklch.cpp` + its ci.yml argv:
-- **Golden:** new `gen_gamut_oklrab_golden.py` off the oklch template; generate at oracle `27bd085`
-  (`git -C /home/user/spektrafilm checkout 27bd085`, restore after); pin that SHA in the gen script.
-- **C++:** port into `model/gamut_compression.cpp` reusing oklch's `C_max(L, h)` bisection table,
-  here indexed by the reference-lightness `Lr`; enum slot `kOklrab=4` is **already reserved**.
-- **Gate:** `test_gamut_out_oklrab` + its `ci.yml` `build_run … tests/gamut_oklrab_cases.bin` line
-  (bumps the suite to 35). Add `gamut_out_oklrab` to the enumerated lists in CLAUDE.md + the skills.
-- **Facade/UI:** add `OKLRAB` to `enum class OutputGamutCompress` and the Output-gamut dropdown.
-- Then **`jzazbz`** (`kJzazbz=5`) and **`cam16ucs`** (`kCam16ucs=6`, the heaviest — full CIECAM16).
+Slice 2 `oklrab` is DONE (see the state block above). Clone the same pattern; the templates are now
+`tools/parity/gen_gamut_oklrab_golden.py`, `model/gamut_compression.{h,cpp}` (oklch + oklrab
+sections), and `tests/test_gamut_out_oklrab.cpp` + its ci.yml argv. **`jzazbz` is harder than
+oklrab** — it is NOT a simple L-remap: it needs a JzAzBz forward/inverse (PQ encoding + matrices,
+absolute-luminance scaled by `_JZAZBZ_Y_W_CDM2 = 100` cd/m²) and its OWN C_max table geometry
+(`L_grid=linspace(0.002, 0.18, 64)`, `chroma_initial_upper=0.3`) plus a per-space Jz-white
+normalizer for the lightness knee (`_jzazbz_white_Jz`). See oracle `compress_rgb_jzazbz_chroma` +
+the `"jzazbz"` branch of `_get_output_c_max_table` in `utils/gamut_compression.py`.
+- **Golden:** new `gen_gamut_oklrab_golden.py`-clone → `gen_gamut_jzazbz_golden.py`; call
+  `gc.compress_rgb_jzazbz_chroma`; generate at oracle `27bd085` (already checked out) and pin the SHA.
+- **C++:** port JzAzBz forward/inverse into `model/gamut_compression.cpp` (capture the colour-science
+  matrices/constants as bit-exact hex, as oklch did for OkLab); enum slot `kJzazbz=5` is reserved.
+- **Gate:** `test_gamut_out_jzazbz` + its `ci.yml` `build_run … tests/gamut_jzazbz_cases.bin` line
+  (bumps the suite to 36). Add `gamut_out_jzazbz` to the enumerated lists in CLAUDE.md + the skills.
+- **Facade/UI:** add `JZAZBZ` to `enum class OutputGamutCompress` (+ the exhaustive `when` in
+  MainActivity — Kotlin will error if you forget) and the Output-gamut dropdown.
+- Then **`cam16ucs`** (`kCam16ucs=6`, the heaviest — full CIECAM16 forward/inverse). Default upstream.
 
 Per increment: default path byte-identical, opt-in/default-OFF, feature-on within tol
 (`max_abs ≤ 1e-4`, `rms ≤ 1e-5`), `SPK_NUM_THREADS` 1≡8, NDK r27 3-ABI build, commit+push on green.
@@ -112,6 +129,18 @@ Per increment: default path byte-identical, opt-in/default-OFF, feature-on withi
 
 ## Session history (compressed; full prose in this file's git history)
 
+- **2026-07-02 — P2 #6 slice 2: `oklrab` output-gamut compression (new draft PR, unmerged).** Cloned
+  the merged `oklch` pattern: `compress_rgb_oklrab_chroma` = the oklch chroma reduction with the
+  `C_max` lookup indexed by Ottosson 2023's rebased lightness `Lr = f(L)` (constants k1=0.206,
+  k2=0.03, k3=(1+k1)/(1+k2)); the `C_max(Lr,h)` bisection table is built over an Lr grid with each
+  row's OkLab `L` recovered by the inverse remap before `Oklab→XYZ`, and reconstruction preserves the
+  original (lightness-compressed) `L`. Reuses oklch's OkLab/RGB↔XYZ hex constants, `cmax_lookup`,
+  `reinhard_knee`; table built locally per call (thread-invariant, warm==cold). Golden
+  `gen_gamut_oklrab_golden.py` @ oracle `27bd085` (24 cases / 1152 px); gate `test_gamut_out_oklrab`
+  `max_abs 1.055e-14` / probes `1.221e-15`. Suite 34→35, defaults byte-identical, oklch/aces/
+  output_spaces/simulate_e2e/test_parallel unchanged. Facade `OKLRAB`=4 + Output-gamut dropdown
+  ("Oklrab (perceptual, even lightness)"); `:app:compileDebugKotlin` green. Commits `9cb0a0b` /
+  `94d2274` / `e1b75d8`.
 - **2026-07-02 — "exact + fast" pass (PR #109 + #110).** F1–F7 Kotlin fixes; **E1** per-effect
   spatial gates (`test_spatial_decouple_e2e`, golden `scan_portra_lensblur_nohalation`); **E2**
   print-route filming spatial + grain (`test_print_spatial_e2e`, golden `print_portra_spatial`);

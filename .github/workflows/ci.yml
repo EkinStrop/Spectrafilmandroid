@@ -230,6 +230,7 @@ jobs:
           # compression), so every other golden stays byte-identical; this gates only the
           # opt-in kAcesRgc math.
           build_run test_gamut_out_aces tests/gamut_aces_cases.bin
+          build_run test_gamut_out_oklch tests/gamut_oklch_cases.bin
           # OPT-IN input gamut compression — radial xy compression toward the visible
           # spectral locus (model/gamut_compression.cpp::spectral_locus_xy +
           # compress_xy_radial, reusing the shared reinhard_knee) plus the tc_lut

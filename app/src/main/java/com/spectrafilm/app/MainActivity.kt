@@ -2975,12 +2975,17 @@ class MainActivity : ComponentActivity() {
                     Dropdown(
                         "Output gamut compression",
                         s.outputGamutCompress,
-                        listOf(OutputGamutCompress.LEGACY_CLIP, OutputGamutCompress.ACES_RGC),
+                        listOf(
+                            OutputGamutCompress.LEGACY_CLIP,
+                            OutputGamutCompress.ACES_RGC,
+                            OutputGamutCompress.OKLCH,
+                        ),
                         {
                             when (it) {
                                 OutputGamutCompress.LEGACY_CLIP -> "Off"
                                 OutputGamutCompress.OFF -> "Off (no clip)"
                                 OutputGamutCompress.ACES_RGC -> "ACES (tame out-of-gamut)"
+                                OutputGamutCompress.OKLCH -> "Oklch (perceptual, keep hue)"
                             }
                         },
                         { s.outputGamutCompress = it },

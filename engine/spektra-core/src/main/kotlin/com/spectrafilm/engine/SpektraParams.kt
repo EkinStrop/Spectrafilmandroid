@@ -21,10 +21,13 @@ enum class ColorSpace { SRGB, ADOBE_RGB, PROPHOTO, REC2020, ACES2065_1, LINEAR_S
  *   OFF=1         — oracle "off": output RGB passes through with no compression and no clip.
  *   ACES_RGC=2    — ACES Reference Gamut Compression v1.3 (per-channel knee on the
  *                   achromatic distance) in the linear output space.
- * The perceptual algos (oklch/oklrab/jzazbz/cam16ucs, C++ ordinals 3..6) are reserved
+ *   OKLCH=3       — perceptual-hue-preserving chroma compression at constant Oklch (L, h):
+ *                   a Reinhard knee on C / C_max(L, h), where the per-output-space gamut
+ *                   boundary C_max is regenerated in-engine by bisection.
+ * The remaining perceptual algos (oklrab/jzazbz/cam16ucs, C++ ordinals 4..6) are reserved
  * upstream and not yet ported, so they are intentionally absent here.
  */
-enum class OutputGamutCompress { LEGACY_CLIP, OFF, ACES_RGC }
+enum class OutputGamutCompress { LEGACY_CLIP, OFF, ACES_RGC, OKLCH }
 
 /**
  * Input gamut compression algorithm (opt-in, default-off). Ordinals MUST match the C++

@@ -16,9 +16,11 @@
  * existing behavior (no compression; scanning's final np.clip(0,1)) — so every
  * pre-existing golden stays byte-identical. kAcesRgc opts into the ACES RGC knee
  * in the linear output space (gated by tests/test_gamut_out_aces.cpp against an
- * upstream gamut_compression.py golden). reinhard_knee is the shared knee the
- * input/perceptual gamut items (the P2 follow-up) reuse. The perceptual
- * algorithms (oklch/oklrab/jzazbz/cam16ucs) are reserved here, not yet ported.
+ * upstream gamut_compression.py golden). kOklch opts into the OkLch perceptual
+ * chroma reduction toward the output RGB cube (compress_rgb_oklch_chroma, gated by
+ * tests/test_gamut_out_oklch.cpp). reinhard_knee is the shared knee the
+ * input/perceptual gamut items reuse. The remaining perceptual algorithms
+ * (oklrab/jzazbz/cam16ucs) are reserved here, not yet ported.
  */
 #ifndef SPK_MODEL_GAMUT_COMPRESSION_H
 #define SPK_MODEL_GAMUT_COMPRESSION_H
@@ -34,8 +36,12 @@ namespace spk {
 //                 and no implied clip). Reserved; not selected by default.
 //   kAcesRgc    — ACES Reference Gamut Compression v1.3 (per-channel knee on the
 //                 achromatic distance), applied in the linear output space.
-//   kOklch/kOklrab/kJzazbz/kCam16ucs — perceptual chroma reduction. RESERVED
-//                 (P2 follow-up); not implemented yet.
+//   kOklch      — OkLch perceptual chroma reduction toward the output RGB cube
+//                 (constant OkLab hue + lightness; one-sided lightness knee then a
+//                 chroma knee against a per-space C_max(L,h) table). Opt-in; gated
+//                 by tests/test_gamut_out_oklch.cpp.
+//   kOklrab/kJzazbz/kCam16ucs — perceptual chroma reduction. RESERVED (P2
+//                 follow-up); not implemented yet.
 enum class OutputGamutCompress {
     kLegacyClip = 0,
     kOff        = 1,
@@ -84,6 +90,29 @@ void compress_pixel_aces_rgc(const double rgb[3], double threshold, double limit
 // In-place ACES RGC over an interleaved (npix*3) row-major linear-RGB image.
 void compress_rgb_aces_rgc(double* rgb, int npix, double threshold, double limit,
                            double power);
+
+// ---- Output-side: OkLch perceptual chroma reduction to the output RGB cube -------
+// (gamut_compression.py::compress_rgb_oklch_chroma, dispatched by compress_rgb with
+// algorithm=="oklch".) Perceptual-hue- and lightness-preserving chroma reduction.
+// Per pixel: linear output-space RGB -> XYZ (native per-space matrix, illuminant = the
+// space's OWN whitepoint, no CAT) -> OkLab -> OkLch(L,C,h); a one-sided reinhard
+// lightness knee on L (params (0.7,1.0,2.2), L_white=1 — the OutputGamutCompressSpec
+// default the golden pins) runs BEFORE the chroma step, so the C_max lookup and the
+// reconstruction both use the corrected L, while C and h come from the ORIGINAL a,b;
+// look up the max in-gamut chroma C_max(L,h) for the destination RGB cube (a 64x720
+// bisection table) and pass C/C_max through the shared reinhard_knee; reconstruct
+// OkLch -> OkLab -> XYZ -> RGB. All math is double precision (NumPy float64). No clip
+// (scanning clips afterwards, exactly as the oracle leaves it). `output_space` is
+// spk_color_space 0..5 (selects the per-space RGB<->XYZ matrix and the C_max table).
+//
+// OPT-IN: gated by tests/test_gamut_out_oklch.cpp; the scanning hook runs it only when
+// output_gamut_compress == kOklch, so every pre-existing golden stays byte-identical.
+
+// In-place OkLch chroma reduction over an interleaved (npix*3) row-major linear-RGB
+// image in `output_space`. Builds the per-space C_max(L,h) table ONCE (locally, no
+// static state -> thread-invariant and warm==cold), then loops the pixels.
+void compress_rgb_oklch_chroma(double* rgb, int npix, int output_space,
+                               double threshold, double limit, double power);
 
 // ---- Input-side: radial xy compression toward the visible spectral locus --------
 // (gamut_compression.py input path: spectral_locus_xy + compress_xy_radial.) These

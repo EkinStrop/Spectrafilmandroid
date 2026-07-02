@@ -127,16 +127,20 @@ class SpektraEngine private constructor(
      * specific `spk_status` message) propagates; a null return without an
      * exception is reported as an unexpected fault.
      */
-    fun simulate(image: LinearImage, params: SpektraParams): SimResult =
-        nativeSimulate(handle, image.data, image.width, image.height,
+    fun simulate(image: LinearImage, params: SpektraParams): SimResult {
+        check(!destroyed) { "spektra: simulate called on a closed engine" }
+        return nativeSimulate(handle, image.data, image.width, image.height,
             image.colorSpace, params, /* preview = */ false)
             ?: error("spektra: simulate returned null (handle=$handle)")
+    }
 
     /** Downscaled fast path to [SettingsParams.previewMaxSize] for interactive tuning. */
-    fun simulatePreview(image: LinearImage, params: SpektraParams): SimResult =
-        nativeSimulate(handle, image.data, image.width, image.height,
+    fun simulatePreview(image: LinearImage, params: SpektraParams): SimResult {
+        check(!destroyed) { "spektra: simulatePreview called on a closed engine" }
+        return nativeSimulate(handle, image.data, image.width, image.height,
             image.colorSpace, params, /* preview = */ true)
             ?: error("spektra: simulatePreview returned null (handle=$handle)")
+    }
 
     /**
      * Bake the current film look into a 3D `.cube` LUT (Adobe/Resolve format) and
@@ -151,9 +155,11 @@ class SpektraEngine private constructor(
      * unsharp) cannot be captured by a 3D LUT and are forced OFF for the bake;
      * this is documented in the emitted `.cube` header. Heavy; call off the main thread.
      */
-    fun bakeCubeLut(params: SpektraParams, size: Int = 33): String =
-        nativeBakeCubeLut(handle, params, size)
+    fun bakeCubeLut(params: SpektraParams, size: Int = 33): String {
+        check(!destroyed) { "spektra: bakeCubeLut called on a closed engine" }
+        return nativeBakeCubeLut(handle, params, size)
             ?: error("spektra: bakeCubeLut returned null (handle=$handle)")
+    }
 
     /** Destroy the native engine. Idempotent — a second call is a no-op (no double free). */
     @Synchronized

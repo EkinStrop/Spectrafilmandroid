@@ -27,7 +27,7 @@
  *
  * Counter columns: for COLD rows, the fresh engine's absolute counters after one
  * cold simulate (scan 0/0; print 0 hit / 1 miss). For WARM rows, the DELTA over
- * the measured block (1 warmup + N reps) — scan stays 0/0, print climbs on hits.
+ * the measured block (1 warmup + N reps) — hits climb on the matching route slot.
  * Honours SPK_NUM_THREADS (read by the engine's parallel_for) and reports the
  * active worker count. Optional env BENCH_REPS (>=3, default 3).
  *
@@ -53,6 +53,8 @@
 // Forward-declared exactly as test_simulate_e2e.cpp does — no header / ABI change.
 extern uint64_t spk_test_film_cache_hits(spk_engine* eng);
 extern uint64_t spk_test_film_cache_misses(spk_engine* eng);
+extern uint64_t spk_test_scan_film_cache_hits(spk_engine* eng);
+extern uint64_t spk_test_scan_film_cache_misses(spk_engine* eng);
 
 namespace {
 
@@ -209,7 +211,7 @@ int main(int argc, char** argv) {
                 thr_env ? thr_env : "unset");
     std::printf("reps:    %d timed + 1 warmup per scenario (median ms)\n", reps);
     std::printf("params:  parity-deterministic (grain/halation/glare/AE off);"
-                " memo active on print route only\n");
+                " film memo active on BOTH routes (per-route slots)\n");
 
     std::vector<Row> rows;
 
@@ -219,8 +221,8 @@ int main(int argc, char** argv) {
         spk_params ps = base_params(1);
         spk_engine* keep = nullptr;
         double ms = cold_median_ms(asset_dir, &in, &ps, reps, &keep);
-        long long h = keep ? (long long)spk_test_film_cache_hits(keep) : 0;
-        long long m = keep ? (long long)spk_test_film_cache_misses(keep) : 0;
+        long long h = keep ? (long long)spk_test_scan_film_cache_hits(keep) : 0;
+        long long m = keep ? (long long)spk_test_scan_film_cache_misses(keep) : 0;
         if (keep) spk_engine_destroy(keep);
         rows.push_back({"1 cold scan default (full pipeline)", ms, h, m});
     }
@@ -239,28 +241,30 @@ int main(int argc, char** argv) {
         }
 
         // Scenario 2: repeat identical params.
-        uint64_t h0 = spk_test_film_cache_hits(eng), m0 = spk_test_film_cache_misses(eng);
+        uint64_t h0 = spk_test_scan_film_cache_hits(eng),
+                 m0 = spk_test_scan_film_cache_misses(eng);
         double ms2 = warm_median_ms(reps, [&]() {
             spk_image o{};
             spk_simulate(eng, &in, &ps, &o);
             if (o.data) spk_image_free(&o);
         });
-        long long h2 = (long long)(spk_test_film_cache_hits(eng) - h0);
-        long long m2 = (long long)(spk_test_film_cache_misses(eng) - m0);
+        long long h2 = (long long)(spk_test_scan_film_cache_hits(eng) - h0);
+        long long m2 = (long long)(spk_test_scan_film_cache_misses(eng) - m0);
         rows.push_back({"2 warm scan repeat identical params", ms2, h2, m2});
 
         // Scenario 3: output-only edit (change output color space).
         std::fprintf(stderr, "[3/6] warm scan output-only...\n");
         spk_params p3 = base_params(1);
         p3.output_color_space = SPK_CS_ADOBE_RGB;
-        uint64_t h1 = spk_test_film_cache_hits(eng), m1 = spk_test_film_cache_misses(eng);
+        uint64_t h1 = spk_test_scan_film_cache_hits(eng),
+                 m1 = spk_test_scan_film_cache_misses(eng);
         double ms3 = warm_median_ms(reps, [&]() {
             spk_image o{};
             spk_simulate(eng, &in, &p3, &o);
             if (o.data) spk_image_free(&o);
         });
-        long long h3 = (long long)(spk_test_film_cache_hits(eng) - h1);
-        long long m3 = (long long)(spk_test_film_cache_misses(eng) - m1);
+        long long h3 = (long long)(spk_test_scan_film_cache_hits(eng) - h1);
+        long long m3 = (long long)(spk_test_scan_film_cache_misses(eng) - m1);
         rows.push_back({"3 warm scan output-only edit (out cs)", ms3, h3, m3});
 
         spk_engine_destroy(eng);

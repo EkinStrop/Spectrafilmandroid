@@ -60,7 +60,13 @@ class RawCoilDecoder private constructor(
             RawDecoder.decodeToLinear(bytes, RawDecoder.Settings(WhiteBalance.AS_SHOT))
         }.getOrNull() ?: return null
 
-        val bitmap = linear.toDisplayBitmap()
+        // The decode result owns a native (off-heap) buffer the GC never sees; the
+        // display bitmap is a managed copy, so free the native side unconditionally.
+        val bitmap = try {
+            linear.toDisplayBitmap()
+        } finally {
+            RawDecoder.freeOffHeap(linear.data)
+        }
         return DecodeResult(
             image = bitmap.asImage(),
             isSampled = false,

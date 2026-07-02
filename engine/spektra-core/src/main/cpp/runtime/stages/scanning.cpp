@@ -328,6 +328,14 @@ void scan(const Profile& film, const ScanningParams& params,
                                   static_cast<int>(params.output_color_space),
                                   params.gamut_knee_threshold, params.gamut_knee_limit,
                                   params.gamut_knee_power);
+    } else if (params.output_gamut_compress == OutputGamutCompress::kOklrab) {
+        // Same chroma reduction as kOklch, but the C_max lookup is indexed by
+        // Ottosson's rebased lightness Lr (model/gamut_compression.cpp) for a more
+        // perceptually uniform knee across light/dark. Same per-space selection.
+        compress_rgb_oklrab_chroma(lin_rgb.data(), npix,
+                                   static_cast<int>(params.output_color_space),
+                                   params.gamut_knee_threshold, params.gamut_knee_limit,
+                                   params.gamut_knee_power);
     }
 
     // Scanner lens blur (scanner.lens_blur, in pixels): a per-channel 2D Gaussian

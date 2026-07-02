@@ -463,6 +463,111 @@ void compress_pixel_oklch(const double rgb_in[3], int space, const double* table
     mat3_mul(kXyzToRgb[space], xyz_new, out);
 }
 
+// ---------------------------------------------------------------------------
+// Oklrab: OkLch chroma reduction indexed by Ottosson's rebased lightness Lr.
+// (gamut_compression.py::compress_rgb_oklrab_chroma + the "oklrab" branch of
+// _get_output_c_max_table: same _build_polar_perceptual_c_max_table, but the polar
+// coord is (Lr, a, b) and the reconstruction inverts Lr->L before Oklab_to_XYZ.)
+// ---------------------------------------------------------------------------
+
+// Ottosson 2023 OkLab "Lr" — a 1D nonlinear remap of OkLab's L so the lightness scale
+// tracks CIELAB L* more closely. https://bottosson.github.io/posts/colorpicker/
+// (gamut_compression.py::_OKLRAB_K1/_K2/_K3.)
+constexpr double kOklrabK1 = 0.206;
+constexpr double kOklrabK2 = 0.03;
+constexpr double kOklrabK3 = (1.0 + kOklrabK1) / (1.0 + kOklrabK2);
+
+// Forward L -> Lr (gamut_compression.py::_oklab_L_to_oklrab_Lr):
+//   t = k3*L - k1 ; Lr = 0.5*(t + sqrt(t*t + 4*k2*k3*L)). Monotonic on [0,1], Lr(0)=0.
+inline double oklab_L_to_oklrab_Lr(double L) {
+    const double t = kOklrabK3 * L - kOklrabK1;
+    return 0.5 * (t + std::sqrt(t * t + 4.0 * kOklrabK2 * kOklrabK3 * L));
+}
+
+// Inverse Lr -> L (gamut_compression.py::_oklrab_Lr_to_oklab_L):
+//   L = (Lr*(Lr + k1)) / (k3*(Lr + k2)).
+inline double oklrab_Lr_to_oklab_L(double Lr) {
+    return (Lr * (Lr + kOklrabK1)) / (kOklrabK3 * (Lr + kOklrabK2));
+}
+
+// Build the (kOklchNL x kOklchNH) C_max(Lr,h) table for output `space`, plus its grids.
+// Identical geometry to build_oklch_cmax_table (L_grid=linspace(0.02,1,64) inclusive,
+// h_grid=linspace(-π,π,720,endpoint=False), chroma upper 0.5, kOklchNBisect iterations,
+// in-gamut iff every native-RGB channel is in [-1e-6,1+1e-6]) — but the L axis IS Lr, so
+// each grid row's OkLab lightness is recovered by oklrab_Lr_to_oklab_L before Oklab->XYZ.
+// The stored L_grid keeps the Lr values so the per-pixel cmax_lookup can index by Lr.
+void build_oklrab_cmax_table(int space, double* table, double* L_grid, double* h_grid) {
+    const double Lstep = (1.0 - 0.02) / static_cast<double>(kOklchNL - 1);
+    for (int i = 0; i < kOklchNL; ++i)
+        L_grid[i] = static_cast<double>(i) * Lstep + 0.02;  // Lr grid
+    L_grid[kOklchNL - 1] = 1.0;  // np.linspace endpoint override
+    const double hstart = -kPi;
+    const double hstep = (kPi - (-kPi)) / static_cast<double>(kOklchNH);
+    for (int j = 0; j < kOklchNH; ++j)
+        h_grid[j] = static_cast<double>(j) * hstep + hstart;
+
+    const double(*M)[3] = kXyzToRgb[space];
+    for (int i = 0; i < kOklchNL; ++i) {
+        // The grid value is Lr; the OkLab L for the bisection reconstruction is its
+        // inverse remap (oracle's polar_to_xyz_unit for the "oklrab" table).
+        const double L = oklrab_Lr_to_oklab_L(L_grid[i]);
+        for (int j = 0; j < kOklchNH; ++j) {
+            const double ch = std::cos(h_grid[j]);
+            const double sh = std::sin(h_grid[j]);
+            double lo = 0.0;
+            double hi = 0.5;
+            for (int it = 0; it < kOklchNBisect; ++it) {
+                const double mid = (lo + hi) * 0.5;
+                const double lab[3] = {L, mid * ch, mid * sh};
+                double xyz[3];
+                xyz_from_oklab(lab, xyz);
+                double rgb[3];
+                mat3_mul(M, xyz, rgb);
+                const bool in_gamut =
+                    rgb[0] >= -1e-6 && rgb[0] <= 1.0 + 1e-6 &&
+                    rgb[1] >= -1e-6 && rgb[1] <= 1.0 + 1e-6 &&
+                    rgb[2] >= -1e-6 && rgb[2] <= 1.0 + 1e-6;
+                if (in_gamut) lo = mid; else hi = mid;
+            }
+            table[static_cast<size_t>(i) * kOklchNH + j] = lo;
+        }
+    }
+}
+
+// One linear-RGB triple -> compressed triple via the Lr-indexed reduction. Mirrors
+// compress_pixel_oklch except the C_max lookup axis is Lr = f(L); the reconstruction
+// still preserves the (lightness-compressed) OkLab L. `out` may alias `rgb_in`.
+void compress_pixel_oklrab(const double rgb_in[3], int space, const double* table,
+                           const double* L_grid, const double* h_grid, double threshold,
+                           double limit, double power, double out[3]) {
+    double xyz[3];
+    mat3_mul(kRgbToXyz[space], rgb_in, xyz);
+    double lab[3];
+    oklab_from_xyz(xyz, lab);
+    const double a = lab[1];
+    const double b = lab[2];
+
+    // One-sided lightness knee on L (pinned (0.7,1.0,2.2), L_white=1) runs BEFORE the Lr
+    // remap; the C_max lookup uses Lr, but C, h, and the reconstruction use this L.
+    const double L = reinhard_knee(lab[0], 0.7, 1.0, 2.2);
+    const double Lr = oklab_L_to_oklrab_Lr(L);
+    const double C = std::hypot(a, b);
+    const double h = std::atan2(b, a);
+
+    const double C_max = cmax_lookup(Lr, h, table, L_grid, h_grid);  // indexed by Lr
+    const double safe_C_max = std::fmax(C_max, 1e-9);
+    const double d_norm = C / safe_C_max;
+    const double d_comp = reinhard_knee(d_norm, threshold, limit, power);
+    const double C_new = d_comp * safe_C_max;
+
+    const double a_new = C_new * std::cos(h);
+    const double b_new = C_new * std::sin(h);
+    const double lab_new[3] = {L, a_new, b_new};  // reconstruct on L, not Lr
+    double xyz_new[3];
+    xyz_from_oklab(lab_new, xyz_new);
+    mat3_mul(kXyzToRgb[space], xyz_new, out);
+}
+
 }  // namespace
 
 void compress_rgb_oklch_chroma(double* rgb, int npix, int output_space, double threshold,
@@ -478,6 +583,22 @@ void compress_rgb_oklch_chroma(double* rgb, int npix, int output_space, double t
         const double in[3] = {px[0], px[1], px[2]};
         compress_pixel_oklch(in, output_space, table.data(), L_grid, h_grid, threshold,
                              limit, power, px);
+    }
+}
+
+void compress_rgb_oklrab_chroma(double* rgb, int npix, int output_space, double threshold,
+                                double limit, double power) {
+    // Build the per-space C_max(Lr,h) table ONCE, locally (no static/global state ->
+    // thread-invariant and warm==cold). One build per image; this path is opt-in.
+    std::vector<double> table(static_cast<size_t>(kOklchNL) * kOklchNH);
+    double L_grid[kOklchNL];
+    double h_grid[kOklchNH];
+    build_oklrab_cmax_table(output_space, table.data(), L_grid, h_grid);
+    for (int p = 0; p < npix; ++p) {
+        double* px = rgb + static_cast<long>(p) * 3;
+        const double in[3] = {px[0], px[1], px[2]};
+        compress_pixel_oklrab(in, output_space, table.data(), L_grid, h_grid, threshold,
+                              limit, power, px);
     }
 }
 

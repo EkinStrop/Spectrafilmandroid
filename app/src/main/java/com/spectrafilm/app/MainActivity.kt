@@ -2979,6 +2979,7 @@ class MainActivity : ComponentActivity() {
                             OutputGamutCompress.LEGACY_CLIP,
                             OutputGamutCompress.ACES_RGC,
                             OutputGamutCompress.OKLCH,
+                            OutputGamutCompress.OKLRAB,
                         ),
                         {
                             when (it) {
@@ -2986,6 +2987,7 @@ class MainActivity : ComponentActivity() {
                                 OutputGamutCompress.OFF -> "Off (no clip)"
                                 OutputGamutCompress.ACES_RGC -> "ACES (tame out-of-gamut)"
                                 OutputGamutCompress.OKLCH -> "Oklch (perceptual, keep hue)"
+                                OutputGamutCompress.OKLRAB -> "Oklrab (perceptual, even lightness)"
                             }
                         },
                         { s.outputGamutCompress = it },

@@ -18,9 +18,11 @@
  * in the linear output space (gated by tests/test_gamut_out_aces.cpp against an
  * upstream gamut_compression.py golden). kOklch opts into the OkLch perceptual
  * chroma reduction toward the output RGB cube (compress_rgb_oklch_chroma, gated by
- * tests/test_gamut_out_oklch.cpp). reinhard_knee is the shared knee the
+ * tests/test_gamut_out_oklch.cpp). kOklrab is the same chroma reduction indexed by
+ * Ottosson's rebased lightness Lr (compress_rgb_oklrab_chroma, gated by
+ * tests/test_gamut_out_oklrab.cpp). reinhard_knee is the shared knee the
  * input/perceptual gamut items reuse. The remaining perceptual algorithms
- * (oklrab/jzazbz/cam16ucs) are reserved here, not yet ported.
+ * (jzazbz/cam16ucs) are reserved here, not yet ported.
  */
 #ifndef SPK_MODEL_GAMUT_COMPRESSION_H
 #define SPK_MODEL_GAMUT_COMPRESSION_H
@@ -40,8 +42,12 @@ namespace spk {
 //                 (constant OkLab hue + lightness; one-sided lightness knee then a
 //                 chroma knee against a per-space C_max(L,h) table). Opt-in; gated
 //                 by tests/test_gamut_out_oklch.cpp.
-//   kOklrab/kJzazbz/kCam16ucs — perceptual chroma reduction. RESERVED (P2
-//                 follow-up); not implemented yet.
+//   kOklrab     — the same OkLch chroma reduction, but the C_max lookup is indexed by
+//                 Ottosson's rebased lightness Lr = f(L) (a monotonic remap of OkLab L
+//                 toward CIELAB L*), so the knee response is more perceptually uniform
+//                 across light/dark. Opt-in; gated by tests/test_gamut_out_oklrab.cpp.
+//   kJzazbz/kCam16ucs — perceptual chroma reduction. RESERVED (P2 follow-up);
+//                 not implemented yet.
 enum class OutputGamutCompress {
     kLegacyClip = 0,
     kOff        = 1,
@@ -113,6 +119,22 @@ void compress_rgb_aces_rgc(double* rgb, int npix, double threshold, double limit
 // static state -> thread-invariant and warm==cold), then loops the pixels.
 void compress_rgb_oklch_chroma(double* rgb, int npix, int output_space,
                                double threshold, double limit, double power);
+
+// ---- Output-side: Oklrab perceptual chroma reduction (Lr-indexed) ---------------
+// (gamut_compression.py::compress_rgb_oklrab_chroma, dispatched by compress_rgb with
+// algorithm=="oklrab".) Byte-for-byte the OkLch reduction above, with ONE change: the
+// per-pixel C_max lookup is indexed by Ottosson 2023's rebased lightness
+// Lr = _oklab_L_to_oklrab_Lr(L) instead of raw OkLab L, and the per-space C_max(Lr,h)
+// bisection table is built over an Lr grid (each grid row's OkLab L is recovered by the
+// inverse remap before Oklab->XYZ). The chroma reconstruction still preserves the
+// original (lightness-compressed) L — only the boundary lookup moves to the Lr axis, so
+// equal knee increments track closer-to-equal perceived lightness. Same double-precision
+// pipeline, same 64x720/18-bisection geometry, same one-sided lightness knee (0.7,1.0,2.2)
+// on L before the Lr remap. OPT-IN: gated by tests/test_gamut_out_oklrab.cpp; the scanning
+// hook runs it only when output_gamut_compress == kOklrab, so every pre-existing golden
+// stays byte-identical.
+void compress_rgb_oklrab_chroma(double* rgb, int npix, int output_space,
+                                double threshold, double limit, double power);
 
 // ---- Input-side: radial xy compression toward the visible spectral locus --------
 // (gamut_compression.py input path: spectral_locus_xy + compress_xy_radial.) These

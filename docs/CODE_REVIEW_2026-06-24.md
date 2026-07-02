@@ -18,7 +18,7 @@
 > **UPDATE 2026-07-02:** of the follow-ups, np_interp (`np_interp` gate), float_to_half RNE,
 > preset/recipe/diagnostics IO off-main, the undo restoring-flag window, GPU-LUT stale-texture
 > re-arm, and allocRotBuf Long-widening have since shipped; for the JNI input-color-space contract
-> and crop-anchor items, check docs/AUDIT.md for current status. Gate count is now 33.
+> and crop-anchor items, check docs/AUDIT.md for current status. Gate count is now 34.
 
 ## 1. Executive summary
 

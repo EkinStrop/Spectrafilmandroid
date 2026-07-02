@@ -144,6 +144,11 @@ int main(int argc, char** argv) {
     p.density_curve_gamma = 1.0f;
     p.grain_active = 0;       // deterministic goldens: stochastic + spatial off.
     p.halation_active = 0;
+    // Spatial effects are per-effect gated (zero = inert); express the
+    // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+    p.dir_diffusion_size_um = 0.0f;
+    p.scanner_unsharp[0] = 0.0f;
+    p.scanner_unsharp[1] = 0.0f;
     p.dir_couplers_active = 1;
     p.glare_active = 0;
     p.scan_film = 1;
@@ -236,6 +241,11 @@ int main(int argc, char** argv) {
     pe.density_curve_gamma = 1.0f;
     pe.grain_active = 0;
     pe.halation_active = 0;
+    // Spatial effects are per-effect gated (zero = inert); express the
+    // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+    pe.dir_diffusion_size_um = 0.0f;
+    pe.scanner_unsharp[0] = 0.0f;
+    pe.scanner_unsharp[1] = 0.0f;
     pe.dir_couplers_active = 1;
     pe.glare_active = 0;
     pe.scan_film = 0;  // negative -> print -> scan route.
@@ -314,6 +324,11 @@ int main(int argc, char** argv) {
         q.density_curve_gamma = 1.0f;
         q.grain_active = 0;       // print route: spatial + stochastic OFF -> cache on
         q.halation_active = 0;
+        // Spatial effects are per-effect gated (zero = inert); express the
+        // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+        q.dir_diffusion_size_um = 0.0f;
+        q.scanner_unsharp[0] = 0.0f;
+        q.scanner_unsharp[1] = 0.0f;
         q.dir_couplers_active = 1;
         q.glare_active = 0;
         q.scan_film = 0;          // negative -> print -> scan route

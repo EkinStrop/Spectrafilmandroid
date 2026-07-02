@@ -282,6 +282,14 @@ jobs:
           # deactivate_spatial_effects, so it changes the film taps + final_rgb with
           # spatial/grain off. Golden (scan_portra_boost) pinned to oracle c1d0e44.
           build_run test_highlight_boost_e2e "$ASSET" "$G/scan_portra_boost" tests/scan_portra_input_rgb.f64 "$G"
+          # SPATIAL-EFFECT DECOUPLING: every spatial effect gates on its OWN params
+          # (zero = inert), matching the oracle; halation_active gates ONLY the
+          # halation/scatter block. Golden = camera lens blur ON (1650 µm) with the
+          # halation triples zeroed (the composition the old master gate could not
+          # produce), pinned to oracle c1d0e44. Also asserts blur on-vs-off with
+          # halation off, discrimination vs the with-halation lensblur golden, and
+          # SPK_NUM_THREADS 1-vs-8 byte-identical output.
+          build_run test_spatial_decouple_e2e "$ASSET" "$G/scan_portra_lensblur_nohalation" tests/scan_portra_input_rgb.f64 "$G"
           exit $fail
 
   # ---------------------------------------------------------------------------

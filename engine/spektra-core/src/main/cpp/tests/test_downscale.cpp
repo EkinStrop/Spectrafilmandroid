@@ -103,6 +103,11 @@ int main(int argc, char** argv) {
     p.density_curve_gamma = 1.0f;
     p.grain_active = 0;
     p.halation_active = 0;
+    // Spatial effects are per-effect gated (zero = inert); express the
+    // oracle's deactivate_spatial_effects by zeroing the nonzero defaults.
+    p.dir_diffusion_size_um = 0.0f;
+    p.scanner_unsharp[0] = 0.0f;
+    p.scanner_unsharp[1] = 0.0f;
     p.dir_couplers_active = 1;
     p.glare_active = 0;
     p.scan_film = 1;

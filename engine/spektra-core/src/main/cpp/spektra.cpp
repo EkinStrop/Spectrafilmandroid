@@ -485,20 +485,18 @@ namespace {
 // digested struct. The per-channel gamma matrices stay film-specific (baked by
 // digest_filming_params, mirroring _apply_film_specifics which overwrites them
 // regardless of user input), so they are NOT taken from spk_params. The
-// diffusion fields are only meaningful in the spatial branch (the digest already
-// zeroes them when spatial is off, matching deactivate_spatial_effects). All
-// values default to the schema defaults, so default params are bit-exact.
-void apply_user_dir_couplers(spk::DirCouplersParams& dc, const spk_params* p,
-                             bool spatial) {
+// diffusion trio is copied unconditionally, matching the oracle's per-effect
+// self-gating: diffusion_size_um <= 0 delegates to the pointwise path
+// (model/couplers.cpp), so a zero size is a strict no-op. All values default to
+// the schema defaults, so default params are bit-exact.
+void apply_user_dir_couplers(spk::DirCouplersParams& dc, const spk_params* p) {
     dc.active = (p->dir_couplers_active != 0);
     dc.amount = p->dir_amount;
     dc.inhibition_samelayer = p->dir_inhibition_samelayer;
     dc.inhibition_interlayer = p->dir_inhibition_interlayer;
-    if (spatial) {
-        dc.diffusion_size_um = p->dir_diffusion_size_um;
-        dc.diffusion_tail_um = p->dir_diffusion_tail_um;
-        dc.diffusion_tail_weight = p->dir_diffusion_tail_weight;
-    }
+    dc.diffusion_size_um = p->dir_diffusion_size_um;
+    dc.diffusion_tail_um = p->dir_diffusion_tail_um;
+    dc.diffusion_tail_weight = p->dir_diffusion_tail_weight;
 }
 
 // Apply the user-controllable halation params from spk_params. The preset-driven
@@ -684,14 +682,17 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
         return SPK_ERR_INTERNAL;  // profile lacks filming fields
     }
 
-    // 2) Digested filming params (auto-exposure off; stochastic/grain off). The
-    //    spatial-effects branch (halation + in-emulsion scatter + DIR-coupler
-    //    diffusion) is enabled when the case requests it via halation_active
-    //    (mirroring deactivate_spatial_effects=False under scan_portra_spatial).
-    const bool spatial = (p->halation_active != 0);
+    // 2) Digested filming params (auto-exposure off; stochastic/grain off).
+    //    Spatial effects are PER-EFFECT gated, exactly like the oracle: absent
+    //    the deactivate_spatial_effects debug switch (no C-API equivalent —
+    //    callers express it by zeroing the per-effect fields), each effect runs
+    //    off its own params and a ZERO value is inert (params_builder.py +
+    //    per-effect self-gates, oracle c1d0e44). halation_active gates ONLY the
+    //    halation/scatter block, mirroring oracle HalationParams.active.
+    const bool halation_on = (p->halation_active != 0);
     const bool grain = (p->grain_active != 0);
     spk::FilmingParams fparams = spk::digest_filming_params(
-        film.is_negative(), spatial,
+        film.is_negative(), /*spatial_effects=*/true,
         !film.stock.empty() ? film.stock.c_str() : p->film_profile);
     fparams.exposure_compensation_ev = p->exposure_compensation_ev;
     const float g = p->density_curve_gamma != 0.0f ? p->density_curve_gamma : 1.0f;
@@ -699,27 +700,22 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     fparams.density_curve_gamma[1] = g;
     fparams.density_curve_gamma[2] = g;
     // DIR-coupler user params (amount / inhibition / diffusion); the per-channel
-    // gamma matrices stay film-specific (baked by the digest).
-    apply_user_dir_couplers(fparams.dir_couplers, p, spatial);
-    // Camera optical diffusion filter (issue #6 exposed-but-inert param). The
-    // oracle's digest_params zeroes camera.diffusion_filter.active under
-    // deactivate_spatial_effects=True, so the diffusion filter belongs to the
-    // spatial branch: it is only applied when spatial (== halation_active) is on.
+    // gamma matrices stay film-specific (baked by the digest). diffusion_size_um
+    // <= 0 self-gates to the pointwise path.
+    apply_user_dir_couplers(fparams.dir_couplers, p);
+    // Camera optical diffusion filter — self-gated on camera_diffusion_active
+    // (plus strength/scale inside apply_diffusion_filter_um), matching the
+    // oracle's gate on diffusion_filter.active alone.
     apply_user_diffusion_filter(fparams.diffusion_filter, p, /*is_camera=*/true);
-    if (!spatial) fparams.diffusion_filter.active = false;
     // Camera lens blur (camera.lens_blur_um) — applied in expose() between the
-    // diffusion filter and halation. The oracle's digest_params zeroes
-    // camera.lens_blur_um under deactivate_spatial_effects=True, so it lives in the
-    // spatial branch: only honoured when spatial (== halation_active) is on. Default
+    // diffusion filter and halation; self-gated on lens_blur_um > 0. Default
     // 0.0 µm => strict no-op, so default params stay bit-exact.
-    fparams.lens_blur_um = spatial ? static_cast<double>(p->lens_blur_um) : 0.0;
-    // pixel_size_um drives both the spatial kernels and the grain blur, so it
-    // must be set whenever either spatial effects or grain are active. It comes
-    // from the resize service (film_format_mm*1000/max(orig h,w), then /=
-    // upscale_factor), computed in preprocess_geometry above.
-    if (spatial || grain) {
-        fparams.pixel_size_um = resize_pixel_size_um;
-    }
+    fparams.lens_blur_um = static_cast<double>(p->lens_blur_um);
+    // pixel_size_um drives the spatial kernels and the grain blur. It comes from
+    // the resize service (film_format_mm*1000/max(orig h,w), then /=
+    // upscale_factor), computed in preprocess_geometry above. Inert while every
+    // spatial effect self-gates off.
+    fparams.pixel_size_um = resize_pixel_size_um;
     if (grain) {
         // grain_active && stochastic effects on -> AgX particle grain. The
         // density_max_curves are filled inside develop() from the film's
@@ -727,9 +723,7 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
         spk::digest_grain_params(fparams);
         apply_user_grain(fparams.grain, p);
     }
-    if (spatial) {
-        // pixel_size_um already set from the resize service above.
-        fparams.pixel_size_um = resize_pixel_size_um;
+    if (halation_on) {
         spk::digest_halation_params(fparams, film.use.c_str(),
                                     film.antihalation.c_str(), true);
         // halation user params (everything except the preset-baked sigma/strength).
@@ -809,15 +803,14 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     // knee stays at the ScanningParams oracle production default (0,1,6).
     sparams.output_gamut_compress =
         static_cast<spk::OutputGamutCompress>(p->output_gamut_compress);
-    if (spatial) {
-        // scanner.unsharp_mask = (sigma, amount); default (0.7, 0.7). scanner
-        // lens_blur (in pixels) is applied before the unsharp mask. Both are part
-        // of the spatial branch (the oracle's digest_params zeroes them under
-        // deactivate_spatial_effects=True), so they are only honoured when spatial.
-        sparams.unsharp_sigma = p->scanner_unsharp[0];
-        sparams.unsharp_amount = p->scanner_unsharp[1];
-        sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
-    }
+    // scanner.unsharp_mask = (sigma, amount) + scanner lens_blur (pixels). Each
+    // self-gates inside scan() (sigma > 0, amount > 0, blur > 0), exactly the
+    // oracle's gates; the deactivate_spatial_effects debug switch is expressed by
+    // passing zeros. Threaded unconditionally so the scanner sharpening no longer
+    // rides on halation_active.
+    sparams.unsharp_sigma = p->scanner_unsharp[0];
+    sparams.unsharp_amount = p->scanner_unsharp[1];
+    sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
     // OPT-IN scanner 3D-LUT acceleration (settings.use_scanner_lut, default 0).
     // When off (the default + parity-gate path) scan() never constructs the LUT and
     // is byte-identical to the direct spectral evaluation. When on, scan() routes
@@ -1078,12 +1071,12 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     fparams.density_curve_gamma[0] = fg;
     fparams.density_curve_gamma[1] = fg;
     fparams.density_curve_gamma[2] = fg;
-    apply_user_dir_couplers(fparams.dir_couplers, p, /*spatial=*/false);
-    // The print route's negative-filming step runs with the spatial branch OFF
-    // (the print parity goldens keep deactivate_spatial_effects=True), so the
-    // camera diffusion filter is not applied here (it lives in the spatial
-    // branch). fparams.spatial_effects stays false -> the filming stage gate
-    // skips it regardless.
+    apply_user_dir_couplers(fparams.dir_couplers, p);
+    // The print route still runs the negative-filming step spatial-OFF (the print
+    // parity goldens keep deactivate_spatial_effects=True): force the DIR
+    // diffusion pointwise (size 0 = the oracle's deactivate zeroing) and keep the
+    // camera diffusion filter off. E2 (print-route spatial) lifts this.
+    fparams.dir_couplers.diffusion_size_um = 0.0;
     fparams.diffusion_filter.active = false;
     // Highlight boost is NOT a spatial effect (it runs in filming.expose regardless of
     // deactivate_spatial_effects). The print route's negative-filming runs spatial-OFF,
@@ -1662,11 +1655,10 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     // represented and would make the lattice irreproducible. We copy the params
     // and disable those, keeping the pointwise color science intact: spectral
     // upsampling, density curves, pointwise DIR couplers, printing, scanning,
-    // and the output color-space transform. (Note: run_scan_film/run_print only
-    // enable the spatial branch when halation_active is set, and only read the
-    // scanner-unsharp / spatial diffusion fields in that branch; grain only runs
-    // when grain_active is set. Disabling those two toggles deactivates every
-    // spatial/stochastic path. We also clear the glare toggles for clarity.)
+    // and the output color-space transform. (Spatial effects are PER-EFFECT
+    // gated — each runs off its own params, zero = inert — so every spatial
+    // field must be zeroed here individually; halation_active alone no longer
+    // masters them.)
     spk_params bp = *p;
     bp.grain_active = 0;
     bp.halation_active = 0;
@@ -1674,6 +1666,11 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     bp.print_glare_active = 0;
     bp.camera_diffusion_active = 0;
     bp.enlarger_diffusion_active = 0;
+    bp.lens_blur_um = 0.0f;
+    bp.dir_diffusion_size_um = 0.0f;  // DIR stays pointwise (size 0), like deactivate
+    bp.scanner_lens_blur = 0.0f;
+    bp.scanner_unsharp[0] = 0.0f;
+    bp.scanner_unsharp[1] = 0.0f;
     // The .cube lattice is a synthetic count x 1 image; geometry transforms must
     // not touch it (a crop/rescale would corrupt the lattice -> wrong LUT).
     bp.crop = 0;

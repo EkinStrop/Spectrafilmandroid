@@ -5,25 +5,28 @@
  *
  * PURE LOCAL TOOL. This is NOT a parity gate and is deliberately NOT wired into
  * .github/workflows/ci.yml. It measures wall-clock cost of the scan_film and
- * print routes and observes the print-route film_density_cmy memo (the extern
- * host counters spk_test_film_cache_hits/misses defined in spektra.cpp ~:216).
+ * print routes and observes the film_density_cmy memos — per-route slots on BOTH
+ * routes since S1 (the extern host counters spk_test_[scan_]film_cache_hits/
+ * misses defined in spektra.cpp).
  *
  * Params mirror the DETERMINISTIC parity config (grain / halation / glare /
  * auto_exposure OFF, dir_couplers ON) — the same config make_p0 uses in
- * test_simulate_e2e.cpp. That config is required for the timings to be stable and
- * for the print-route film memo to engage at all: spektra.cpp gates the memo with
- * `use_film_cache = !tap_bypass && !(halation_active || grain_active)` (:1120), so
- * with the shipped defaults (grain+halation ON) the memo is BYPASSED and scenario
- * 5's "film memo HIT" is unobservable. The scan route (run_scan_film) never
- * consults the memo, so its counters stay 0/0 by design.
+ * test_simulate_e2e.cpp — for stable timings. Since the Option-A spatial key
+ * (S1), deterministic spatial-ON renders memoize too; the film memos bypass only
+ * for debug taps + grain (stochastic). The print route additionally carries the
+ * print-density memo (S2): print_expose+print_develop are keyed on the film
+ * buffer CONTENT + all printing inputs, so scenario 6 (and steady-state 5, whose
+ * reps repeat identical params) reruns scan() alone.
  *
  * Scenarios (each: 1 warmup + N>=3 reps, median ms via steady_clock):
  *   1 cold scan_film default (full pipeline)      — fresh engine/rep, time simulate
- *   2 warm scan repeat identical params           — no scan-route memo today (~cold)
- *   3 warm scan output-only edit (output cs)       — no scan-route memo today (~cold)
+ *   2 warm scan repeat identical params           — scan-route film memo HIT
+ *   3 warm scan output-only edit (output cs)       — scan-route film memo HIT
  *   4 cold print default (full pipeline)          — fresh engine/rep, 1 film MISS
- *   5 warm print y_filter_shift edit               — downstream-only -> film memo HIT
- *   6 warm print output-only edit (output cs)      — downstream-only -> film memo HIT
+ *   5 warm print y_filter_shift edit               — film HIT; pd MISS on the first
+ *                                                    rep, HITs on repeats (median =
+ *                                                    steady state)
+ *   6 warm print output-only edit (output cs)      — film memo HIT + pd memo HIT
  *
  * Counter columns: for COLD rows, the fresh engine's absolute counters after one
  * cold simulate (scan 0/0; print 0 hit / 1 miss). For WARM rows, the DELTA over

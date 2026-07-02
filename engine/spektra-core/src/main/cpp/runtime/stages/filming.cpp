@@ -498,14 +498,19 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // so the default goldens (negative film) stay bit-exact.
     if (params.bw_exposure_correction != 1.0) {
         const double c = params.bw_exposure_correction;
-        for (int i = 0; i < npix * 3; ++i) raw[i] *= c;
+        parallel_for(0, npix * 3, [&](int lo, int hi) {
+            for (int i = lo; i < hi; ++i) raw[i] *= c;
+        });
     }
 
-    // log_raw = log10(fmax(raw, 0) + 1e-10).
-    for (int i = 0; i < npix * 3; ++i) {
-        double lr = std::log10(std::fmax(raw[i], 0.0) + 1e-10);
-        log_raw_out[i] = static_cast<float>(lr);
-    }
+    // log_raw = log10(fmax(raw, 0) + 1e-10). Element-wise -> deterministic
+    // parallel chunks (byte-identical to the serial loop for any thread count).
+    parallel_for(0, npix * 3, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) {
+            double lr = std::log10(std::fmax(raw[i], 0.0) + 1e-10);
+            log_raw_out[i] = static_cast<float>(lr);
+        }
+    });
 }
 
 void develop(const float* log_raw, int width, int height, const Profile& film,

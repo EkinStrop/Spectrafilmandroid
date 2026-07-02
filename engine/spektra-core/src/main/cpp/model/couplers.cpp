@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "kernels/exponential_filter.h"
+#include "kernels/parallel.h"
 
 namespace spk {
 
@@ -246,22 +247,28 @@ void apply_density_correction_dir_couplers(const float* density_cmy, int npix,
             curve_c[c][k] = dc0[k * 3 + c];
         }
     }
-    for (int p = 0; p < npix; ++p) {
-        double silver[3];
-        for (int k = 0; k < 3; ++k) {
-            double s = static_cast<double>(density_cmy[p * 3 + k]);
-            if (positive_film) s = dmax_cmy[k] - s;
-            if (shift != 0.0) s += shift * s * s;
-            silver[k] = s;
+    // Deterministic parallel chunks: each pixel reads only its own density_cmy /
+    // log_raw entries and writes only its own out entries (the per-pixel silver
+    // snapshot already handles out aliasing density_cmy WITHIN a pixel), so the
+    // result is byte-identical to the serial loop for any thread count.
+    parallel_for(0, npix, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p) {
+            double silver[3];
+            for (int k = 0; k < 3; ++k) {
+                double s = static_cast<double>(density_cmy[p * 3 + k]);
+                if (positive_film) s = dmax_cmy[k] - s;
+                if (shift != 0.0) s += shift * s * s;
+                silver[k] = s;
+            }
+            for (int c = 0; c < 3; ++c) {
+                double correction = 0.0;
+                for (int k = 0; k < 3; ++k) correction += silver[k] * M[k * 3 + c];
+                double log_raw_0 = static_cast<double>(log_raw[p * 3 + c]) - correction;
+                out[p * 3 + c] = static_cast<float>(
+                    fast_interp_channel(log_raw_0, axis_c[c].data(), curve_c[c].data(), n));
+            }
         }
-        for (int c = 0; c < 3; ++c) {
-            double correction = 0.0;
-            for (int k = 0; k < 3; ++k) correction += silver[k] * M[k * 3 + c];
-            double log_raw_0 = static_cast<double>(log_raw[p * 3 + c]) - correction;
-            out[p * 3 + c] = static_cast<float>(
-                fast_interp_channel(log_raw_0, axis_c[c].data(), curve_c[c].data(), n));
-        }
-    }
+    });
 }
 
 void apply_density_correction_dir_couplers_spatial(
@@ -333,21 +340,24 @@ void apply_density_correction_dir_couplers_spatial(
 
     // ---- compute_exposure_correction_dir_couplers (diffusion ON) ----
     // correction[p,c] = sum_k silver[p,k] * M[k,c]   (full array, float64)
+    // Per-pixel independent -> deterministic parallel chunks (byte-identical).
     std::vector<double> correction(static_cast<size_t>(npix) * 3);
-    for (int p = 0; p < npix; ++p) {
-        double silver[3];
-        for (int k = 0; k < 3; ++k) {
-            double s = static_cast<double>(density_cmy[p * 3 + k]);
-            if (positive_film) s = dmax_cmy[k] - s;
-            if (shift != 0.0) s += shift * s * s;
-            silver[k] = s;
+    parallel_for(0, npix, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p) {
+            double silver[3];
+            for (int k = 0; k < 3; ++k) {
+                double s = static_cast<double>(density_cmy[p * 3 + k]);
+                if (positive_film) s = dmax_cmy[k] - s;
+                if (shift != 0.0) s += shift * s * s;
+                silver[k] = s;
+            }
+            for (int c = 0; c < 3; ++c) {
+                double corr = 0.0;
+                for (int k = 0; k < 3; ++k) corr += silver[k] * M[k * 3 + c];
+                correction[p * 3 + c] = corr;
+            }
         }
-        for (int c = 0; c < 3; ++c) {
-            double corr = 0.0;
-            for (int k = 0; k < 3; ++k) corr += silver[k] * M[k * 3 + c];
-            correction[p * 3 + c] = corr;
-        }
-    }
+    });
 
     // Diffuse the correction:
     //   correction = (1 - tail_w) * G(size_px) * correction
@@ -362,9 +372,11 @@ void apply_density_correction_dir_couplers_spatial(
         std::vector<double> tail(static_cast<size_t>(npix) * 3);
         double lt[3] = {tail_px, tail_px, tail_px};
         exponential_filter_per_channel_d(correction.data(), w, h, 3, lt, tail.data());
-        const size_t total = static_cast<size_t>(npix) * 3;
-        for (size_t i = 0; i < total; ++i)
-            correction[i] = (1.0 - tail_w) * gauss[i] + tail_w * tail[i];
+        // Element-wise blend -> deterministic parallel chunks (byte-identical).
+        parallel_for(0, npix * 3, [&](int lo, int hi) {
+            for (int i = lo; i < hi; ++i)
+                correction[i] = (1.0 - tail_w) * gauss[i] + tail_w * tail[i];
+        });
     }
 
     // ---- interpolate_exposure_to_density(log_raw - correction, dc0, le, gamma) ----
@@ -378,14 +390,17 @@ void apply_density_correction_dir_couplers_spatial(
             curve_c[c][k] = dc0[k * 3 + c];
         }
     }
-    for (int p = 0; p < npix; ++p) {
-        for (int c = 0; c < 3; ++c) {
-            double log_raw_0 =
-                static_cast<double>(log_raw[p * 3 + c]) - correction[p * 3 + c];
-            out[p * 3 + c] = static_cast<float>(
-                fast_interp_channel(log_raw_0, axis_c[c].data(), curve_c[c].data(), n));
+    // Per-pixel independent interp -> deterministic parallel chunks.
+    parallel_for(0, npix, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p) {
+            for (int c = 0; c < 3; ++c) {
+                double log_raw_0 =
+                    static_cast<double>(log_raw[p * 3 + c]) - correction[p * 3 + c];
+                out[p * 3 + c] = static_cast<float>(
+                    fast_interp_channel(log_raw_0, axis_c[c].data(), curve_c[c].data(), n));
+            }
         }
-    }
+    });
 }
 
 }  // namespace spk

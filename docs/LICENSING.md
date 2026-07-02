@@ -7,7 +7,7 @@ The combined application is distributed under **GPL-3.0-or-later**.
 | Component | Upstream license | Compatibility |
 |-----------|------------------|---------------|
 | spektrafilm (engine we port) | **GPL-3.0** | Defines the floor: any derivative must be GPLv3. |
-| ImageToolbox (host app) | **Apache-2.0** | Apache-2.0 → GPLv3 is **one-way compatible**; Apache code may be incorporated into a GPLv3 work. |
+| ImageToolbox (originally planned host; never vendored — row kept in case its code is ever incorporated) | **Apache-2.0** | Apache-2.0 → GPLv3 is **one-way compatible**; Apache code may be incorporated into a GPLv3 work. |
 | LibRaw (RAW decode) | **LGPL-2.1 / CDDL-1.0** (dual) | We use it under **LGPL-2.1**, which is GPLv3-compatible. |
 
 Result: **GPLv3** is the only license that satisfies all constraints. `LICENSE` is the GPLv3

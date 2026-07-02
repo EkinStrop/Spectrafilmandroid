@@ -24,7 +24,7 @@ informed by how Adobe Lightroom mobile (and other modern mobile RAW editors) act
 | **Smart Previews**: edits run on a lossy DNG proxy (long edge 2560 px, ~2% size); **export re-renders from the full-res original**. | [Adobe: Smart Previews](https://helpx.adobe.com/lightroom-classic/help/lightroom-smart-previews.html) | Adopt the proxy/preview model — which is *exactly* spektrafilm's `preview` vs `scan` split (`settings.preview_max_size`). Interactive sliders run on a downscaled **linear** proxy; the full pipeline runs at full resolution only on export. Raise the default proxy size toward a "smart-preview"-like long edge (≈1280–2560) for quality, configurable. |
 | **Non-destructive**: every edit is a recipe/sidecar (XMP); the original file is never modified; edits re-applied on view/export. | [Adobe non-destructive editing](https://lifeafterphotoshop.com/non-destructive-editing-and-how-it-works/) | Add a **non-destructive recipe layer**: the edit is a serialized `SpektraParams` stored as a sidecar keyed to the source RAW; the original is untouched; re-render on demand. Enables presets (the 28 stocks + saved params), history, and "extract preset" like Lightroom. |
 | **GPU-accelerated editing** for slider responsiveness; same pipeline, faster. | [ACR GPU FAQ](https://helpx.adobe.com/camera-raw/kb/acr-gpu-faq.html) | GPU is an **optional accelerator for the preview path only** — see the precision note below. It is never the parity-bearing implementation. A first, **experimental** step already ships (default-OFF): `LutGpuPreview.kt`, an OpenGL ES 3.0 loupe that GPU-samples a baked 3D LUT of the current look. It captures only the pointwise look (grain/halation forced off) and is not a substitute for the CPU render; export stays CPU. |
-| Imports RAW/DNG/JPEG/TIFF; exports JPEG/DNG/TIFF — **no EXR**. | Lightroom format support | Be photo-app pragmatic: ingest RAW/DNG (LibRaw) + JPEG/PNG/16-bit TIFF; export 16-bit TIFF + high-quality JPEG (+ optional baked DNG). **Defer EXR / 32-bit-float-TIFF I/O** (spektrafilm's OpenImageIO niche) behind the same writer interface for a later milestone. Internal pipeline stays 32-bit float. |
+| Imports RAW/DNG/JPEG/TIFF; exports JPEG/DNG/TIFF — **no EXR**. | Lightroom format support | Be photo-app pragmatic: ingest RAW/DNG (LibRaw) + JPEG/PNG/16-bit TIFF; export 16-bit TIFF + high-quality JPEG (+ optional baked DNG). **Defer EXR only** — 32-bit-float TIFF (TIFF32F + scene-linear TIFF32F) SHIPPED in PR #102 via `:lib:tiffwriter`. Internal pipeline stays 32-bit float. |
 
 Reference open-source corroboration: [RapidRAW](https://github.com/CyberTimon/RapidRAW) — a modern
 non-destructive, GPU-accelerated RAW editor (WGPU/WGSL) — confirms the "offload pipeline to GPU
@@ -60,8 +60,8 @@ sRGB/AdobeRGB/ProPhoto/Rec2020/ACES with ICC on export.
 **Smart additions (Lightroom-informed):** non-destructive recipe/sidecar + presets/history;
 proxy-preview vs full-res-export; device color management for on-screen.
 
-**Deferred (not capability we lose, just niche file formats / later optimization):** EXR &
-32-bit-float TIFF I/O; the full GPU *compute* preview accelerator (an experimental default-OFF
+**Deferred (not capability we lose, just niche file formats / later optimization):** EXR only —
+32-bit-float TIFF (TIFF32F + scene-linear TIFF32F) SHIPPED in PR #102 via `:lib:tiffwriter`; the full GPU *compute* preview accelerator (an experimental default-OFF
 GLES LUT loupe, `LutGpuPreview.kt`, is already in the tree); `lensfunpy` lens correction (unused
 upstream).
 

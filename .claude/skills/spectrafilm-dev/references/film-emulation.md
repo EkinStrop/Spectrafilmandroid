@@ -106,8 +106,12 @@ Cubic resampling 0.5×–2.0×; default identity; bit-exact vs the preprocess pa
     red/orange halo around highlights. Modeled as an additive sum of N Gaussians with `√k`-scaled
     widths and multi-bounce decay (`halation_strength`, `halation_first_sigma_um`,
     `halation_n_bounces`, `halation_bounce_decay`). Anti-halation backing suppresses it
-    (`info.antihalation` tag); CineStill (rem-jet removed) shows very strong halation. Both
-    branches run only when `halation_active && spatial_effects`.
+    (`info.antihalation` tag); CineStill (rem-jet removed) shows very strong halation.
+    **Per-effect spatial gating (E1):** `halation_active` gates ONLY the halation/scatter
+    branches; every spatial effect (lens blur, coupler diffusion, etc.) self-gates on its own
+    params — enforced by `test_spatial_decouple_e2e`. The print route runs the full per-effect
+    filming spatial branch + grain (E2, `test_print_spatial_e2e`); the default print look
+    carrying halation/grain is INTENTIONAL, not a regression.
 - **Grain (signal-dependent).** Grain is **not** additive Gaussian/Poisson noise on the image — it
   is signal-dependent and modeled per layer with an **AgX Poisson-Binomial particle model**:
   particle count per pixel ~ Poisson; developed count ~ Binomial; each developed particle

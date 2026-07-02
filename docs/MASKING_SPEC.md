@@ -1,5 +1,9 @@
 # Masking spec — Lightroom-RE'd, for the Spectrafilmandroid port
 
+> **STATUS 2026-07-02: masking v1 SHIPPED** (linear/radial + luminance/color range, 13 local ops
+> incl Class-S spatial, draw-on-preview overlay, eyedroppers; per-component invert/value in
+> Mask.kt). Open: brush, polygon, AI Subject/Sky, XMP interop/export, Dehaze.
+
 Synthesis of a 3-agent reverse-engineering sweep over our own decompile of the current Lightroom
 Android build (`docs/lightroom-re/` — `cr_*`/`ICB*` symbols), ExifTool's verbatim `crs` masking
 schema, and Adobe public docs, cross-checked against our current `app/.../masks/` code. The goal:
@@ -133,7 +137,8 @@ decode CCTF → ops → re-encode → `(1−α)·in + α·out`):
 Reuse the global math: **Temp/Tint = `CreativeWhiteBalance` Bradford CAT diagonal**, **Saturation/Hue =
 `ColorGrade` Oklab chroma scale + hue rotate**, **Contrast = `ContrastCurve` midtone-pivot S**.
 
-**Class S — spatial / edge-aware, DEFERRED (need a neighborhood pass on output luma):**
+**Class S — spatial / edge-aware: Clarity/Texture/Sharpness/Highlights/Shadows ✅ SHIPPED (PR #103,
+`MaskSpatial`); Dehaze still deferred; LuminanceNoise/Moire/Defringe out of scope (read-compat only):**
 `LocalClarity2012` (large-σ midtone USM), `LocalTexture` (mid-freq DoG/bilateral residual),
 `LocalDehaze` (Dark-Channel-Prior, the one published algo), `LocalSharpness` (luma USM),
 `LocalHighlights2012`/`LocalShadows2012` (local-Laplacian/guided-filter regional gain — **not** a 1-D
@@ -201,18 +206,22 @@ Current: `Mask{components, invert, opacity}`, `Component{mode, shape}`, `MaskCom
 `TierADelta{exposureEv,temp,tint,saturation,contrast}`, `LocalAdjustment{mask,delta}`; `MaskCompositor`
 does exposure-only. **The per-pixel math + fold are already correct and parity-free.** Structural deltas:
 
-1. **Per-component `invert`** (`crs:MaskInverted`) — add to `Mask.Component`, apply `1−c` before the fold.
-   *(biggest interop gap — we only have `Mask`-level invert.)*
-2. **Split opacity** → group `Correction.amount` (`CorrectionAmount`) + per-component `value` (`MaskValue`).
-3. **Regroup `Mask`→`Correction`** `{amount, active, adjust, masks[]}`; rename `TierADelta`→`LocalAdjust`
-   with `crs` names (`exposure2012/temperature/contrast2012/…`); widen to the full set (wire 5, carry the
-   rest as data for round-trip).
-4. **Component identity** — `What`/`MaskSubType`/`ReferencePoint`/`MaskSyncID`/`MaskName` so foreign LR
-   masks survive a round-trip; tolerate unknown `What`.
-5. **Radial `angleDeg`** (rotation) + bbox⇄center/radii converter at the XMP boundary.
-6. **New components:** `Brush` (§2), `Polygon` (§2, our own), `Raster` (AI, §5).
-7. **Nested `rangeMask`** on the component (§4) — Luminance first.
-8. **Pin a unit test** asserting `ADD/SUBTRACT/INTERSECT.ordinal == 0/1/2` so the XMP int map can't drift.
+1. ✅ **DONE** — **Per-component `invert`** (`crs:MaskInverted`) — `Mask.Component.invert`, applied
+   `1−c` before the fold (Mask.kt).
+2. ✅ **DONE** — **Split opacity** → per-component `value` (`crs:MaskValue`) shipped in
+   `Mask.Component.value` (Mask.kt).
+3. **OPEN** — **Regroup `Mask`→`Correction`** `{amount, active, adjust, masks[]}`; rename
+   `TierADelta`→`LocalAdjust` with `crs` names (`exposure2012/temperature/contrast2012/…`); widen to
+   the full set (wire 5, carry the rest as data for round-trip).
+4. **OPEN** — **Component identity** — `What`/`MaskSubType`/`ReferencePoint`/`MaskSyncID`/`MaskName`
+   so foreign LR masks survive a round-trip; tolerate unknown `What`.
+5. ✅ **DONE** — **Radial `angleDeg`** (rotation) shipped in `Radial` (Mask.kt); bbox⇄center/radii
+   converter at the XMP boundary still open.
+6. **OPEN** — **New components:** `Brush` (§2), `Polygon` (§2, our own), `Raster` (AI, §5).
+7. ✅ **DONE** (Luminance + Color) — **Nested `rangeMask`** on the component (§4):
+   `LuminanceRange`/`ColorRange` shipped (Mask.kt); Depth deferred.
+8. ✅ **DONE** — **Pin a unit test** asserting `ADD/SUBTRACT/INTERSECT.ordinal == 0/1/2`
+   (MaskTest.kt).
 
 ## 8. Prioritized implementation plan (each parity-safe, engine untouched)
 1. **Class-P Tier-A ops** in `MaskCompositor` (temp/tint, saturation, contrast, whites/blacks, hue) in the

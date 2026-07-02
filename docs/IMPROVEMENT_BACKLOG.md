@@ -4,26 +4,27 @@ Static RE of Adobe Lightroom mobile (`com.adobe.lrmobile` 11.3.3, APK only) vs S
 today. Evidence keys: `ICB*` = native engine bridge methods in `libLrAndroid.so`;
 `layout/*.xml` = decompiled UI; `native:` = `libLrAndroid.so` symbols. **Spektrafilm baseline:
 global params only (`SpektraParams.kt`), `EditHistory`, `Presets`/`Recipes`, `CropOverlay`,
-TIFF/PNG + Ultra-HDR export.** No masking / local adjustments / tone-curve UI / HSL / color
-grading exist yet — that is the headline gap.
+TIFF/PNG + Ultra-HDR export.** Masking v1 (radial/linear + luminance/color range, 13 local ops)
+and a tone-curve UI (master + per-channel RGB) have since shipped; the remaining headline gaps
+are HSL/color mix, 3-way grading wheels, and brush + AI masks.
 
 Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 
 ## A. Masking & local adjustments — the biggest gap (Spektrafilm is 100% global)
-- **Local-adjustment container** — `ICBCreateNewCorrectionMask`, `ICBAddSelectedMasksToParams`, group add/sub/invert. Wrap a Spektra edit set per mask; **architectural keystone** for everything below. (L)
-- **Linear gradient mask** — `ICBSetLinearGradientCorrectionsToParams`, `ICBSetLinearGradientZeroPoint`. Graduated-ND / sky darkening. (M)
-- **Radial gradient mask** — `ICBSetRadialGradientCorrectionsToParams`, `ICBGetRadialGradientFeather`. Local vignette / halation boost. (M)
+- ✅ **Local-adjustment container** — shipped (masking v1). Wraps a Spektra edit set per mask; the architectural keystone for everything below.
+- ✅ **Linear gradient mask** — shipped (masking v1).
+- ✅ **Radial gradient mask** — shipped (masking v1).
 - **Brush mask** + feather/flow — `ICBCreateBrush`, `ICBBrushMaskToByteArray`. (L)
 - **AI Select Subject** — `ICBSetUPSelectSubjectPipelineConfig` (LiteRt already in our stack). One-tap isolation. (L)
 - **AI Select Sky** — `ICBSetUPSelectSkyPipelineConfig`, `ICBGenerateDynamicSkyPreset`. Pairs with sky-tint film presets. (M)
-- **Luminance range mask** — `ICBGetLumRange`/`SetLumRange`. Restrict grain/halation to shadows/highlights; no ML. (M)
-- **Color range mask** — `ICBSetRangeMaskCorrectionsToParams`, eyedropper; reuses our spectral color math. (M)
+- ✅ **Luminance range mask** — shipped (masking v1).
+- ✅ **Color range mask** (with eyedropper) — shipped (masking v1).
 - **Depth range mask** — `ICBGetDepthRange`/`SetDepthRange`; reuse the Lens-Blur depth map to mask by distance. (M)
-- **Mask overlay viz** — `ICBSetMaskVisualizationMode`/`OverlayColor`/`Opacity`. Required UX for any mask. (S)
+- ✅ **Mask overlay viz** — shipped (draw-on-preview overlay).
 - (Defer: people part-masks `ICBComputePeopleMasks`, background/object select.)
 
 ## B. Tone / color (film looks live here)
-- **Parametric + point tone curve UI** — `ICBGetMainToneCurvePoints`, per-RGB `ICBGetColorToneCurvePoints`, `tone_curve_sheet.xml`. Classic film S-curve over the spectral base. (M)
+- ✅ **Parametric + point tone curve UI** — shipped (master + per-channel RGB point curve).
 - **3-way color grading wheels** — `layout_color_wheel_group.xml`, native `ColorGrade/SHADOW/MIDTONE/HIGHLIGHT/Balance/Blending`. Most-requested film-mood control. (M)
 - **HSL / targeted color mix** — `ICBFillColorMixValues`, `colormixer_layout.xml`. Per-band hue/sat/lum → emulate dye responses. (M)
 - **Targeted on-image color drag (TAT)** — `ICBSampleHueColorForAdjustment`. (M)
@@ -41,8 +42,8 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 - Constrain/expand crop — `ICBHandleConstraintCrop`. (S)
 
 ## E. Presets / profiles / amount
-- **Preset/profile amount slider** — `ICBSetPresetAmount`, `preset_amount_slider_view.xml`, `ICBProfileSupportsAmountSlider`. Dial a film look 0–100%; **highest delight / low effort** on our recipe system. (M/S)
-- **User presets from current edit** — `ICBCreateNewUserPreset` (we have `Recipes`). (M)
+- ✅ **Preset/profile amount slider** — shipped (`PresetAmount.kt`: continuous params lerp, categorical snap at 0.5).
+- ✅ **User presets from current edit** — shipped (save/import/export own presets).
 - Preset groups / favorites / selective-settings — `ICBGetPresetGroupNames`, `create_preset_settings_group_item.xml`. (M)
 - (Defer: recommended/adaptive `ICBComputeAndCacheRecommendedStyle`.)
 
@@ -53,15 +54,15 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 - Granular reset scopes — `ICBResetCropAndGeometryToDefaultState`. (S)
 
 ## G. Compare / before-after / discovery
-- **Before/after toggle & split** — `before_after_popup_view.xml`. Trivial, and we lack it. (S)
+- ✅ **Before/after toggle** — shipped (compare toggle). Split view remains an optional remainder. (S)
 - Inline interactive tutorials ("Discover") — `discover_*_step_view_holder.xml`, `tutorials/content/tut_*.json`. (M)
 - Per-feature onboarding gates — `fragment_masking_onboarding.xml` (extend our `CoachMarks`). (S)
 
 ## H. Render / preview pipeline & performance
-- **Multi-level progressive render** — `ICBSetRenderLevel`, `ICBRenderAsync` (`level_t`/`status_t`). Coarse→fine for the spectral pipeline (we have a CPU two-pass; this is the deeper native model). (L)
+- **Multi-level progressive render** — tracked in `docs/PERF_ROADMAP.md` #6 (which owns it; a CPU coarse→fine two-pass shipped in v0.5.0).
 - **Tiled GPU pyramid** — native `cr_image_tile`, `cr_gpu_pyramid`, `cr_gaussian_pyramid`. Large images / low memory. (L)
 - **Layer-scoped re-render** — `ICBRenderLayerAsync`. Re-render only changed mask/layer. (M)
-- **Pause/refresh render on gesture** — `ICBPauseRendering`/`RefreshRendering`. (S)
+- **Pause/refresh render on gesture** — tracked in `docs/PERF_ROADMAP.md` #5 (which owns it).
 - **Grain mask caching** — native `cr_grain_mask_cache`. Cache AgX grain buffers across renders. (M)
 - **GPU delegate for ML masks** — `libLiteRtClGlAccelerator.so`. (M)
 - **Live histogram w/ clipping** + HDR-range viz — `HistogramView`, `ICBVisualizeHDRRange`. (M)
@@ -73,7 +74,7 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 - **Content Credentials (C2PA)** — `export_cai_config_section.xml`, `c2paIngredients` (lib `libadobe_c2pa.so`). Provenance; differentiator. (L)
 - **DNG export** — `ICBGenerateExportDNG`. (M)
 - **Watermark / film-frame borders** — `ICBAddBorderToJpegFile`, `watermark_editor.xml`. Popular aesthetic. (M)
-- Structured export bottom-sheet — `export_bottom_sheet_layout.xml`. (S)
+- ✅ Structured export bottom-sheet — shipped (`ExportSheet.kt`).
 
 ## J. Misc engine surface
 - AI denoise / texture / sharpen — `ICBCopyValidNoiseReductionParams`, `ICBCopyValidSharpeningParams` (pairs with our unsharp). (M)
@@ -81,16 +82,16 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 
 ---
 
-## Top 10 for the next release (film-emulation focus)
-1. **Preset/profile amount slider** — dial any film look 0–100%. Highest delight, low effort. (M)
-2. **Parametric + point tone curve UI** — film contrast control users expect. (M)
-3. **3-way color grading wheels** — defines color-film mood. (M)
-4. **Local-adjustment container + Linear/Radial gradients** — unlocks all local editing. (L)
-5. **AI Select Subject + Sky** — reuses shipped LiteRt; high "wow", little new infra. (L)
-6. **Multi-level progressive + pause/refresh render** — makes the spectral pipeline feel instant. (L)
-7. **Before/after toggle** — trivial, essential, missing. (S)
-8. **HSL / targeted color mix** — emulate film dye responses per band. (M)
-9. **AVIF + HEIC 10-bit export + C2PA option** — modern HDR formats + provenance (we're on TIFF/PNG). (M/L)
-10. **Copy/paste settings + named versions** — turns `EditHistory` into a workflow. (M)
+## Top items for the next release (film-emulation focus)
+(Shipped entries removed: amount slider, tone curve UI, before/after, and the mask
+container + linear/radial gradients from §A all landed.)
+1. **HSL / targeted color mix** — emulate film dye responses per band. (M)
+2. **3-way color grading wheels** — defines color-film mood. (M)
+3. **Brush mask + AI Select Subject/Sky** — the remaining §A masks; AI reuses shipped LiteRt. (L)
+4. **Progressive render + pause/refresh** — see `docs/PERF_ROADMAP.md` #5/#6. (L)
+5. **AVIF + HEIC 10-bit export + C2PA option** — modern HDR formats + provenance (we're on TIFF/PNG). (M/L)
+6. **Copy/paste settings + named versions** — turns `EditHistory` into a workflow. (M)
 
-**Sequencing:** Item 4 (mask container) is the keystone — 5, 8 and most of §A depend on it; build the "a correction wraps a Spektra edit" abstraction first, then gradients → AI selections → range masks. Items 1, 2, 3, 7 are independent quick wins shippable in parallel.
+**Sequencing:** the mask container shipped in masking v1, so brush → AI selections build on the
+existing "a correction wraps a Spektra edit" abstraction. Items 1, 2, 6 are independent quick
+wins shippable in parallel.

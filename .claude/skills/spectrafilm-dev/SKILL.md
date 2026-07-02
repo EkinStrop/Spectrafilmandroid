@@ -68,19 +68,24 @@ These override convenience. If a change cannot satisfy them, it is not done.
    The whole app is a GPLv3 derivative (CLAUDE.md 126, NOTICE.md, README.md).
 9. **Commit with `-c commit.gpgsign=false`** (the signing server rejects signing here).
    Never commit APKs or a real `keystore.properties`.
+10. **Session continuity.** After a PR merges, recreate the working branch from `origin/main`
+    (never keep committing on the pre-merge branch). After a container reset, re-verify:
+    oracle checkout `/home/user/spektrafilm` at the golden-pinned SHA (`c1d0e44` for
+    param-wiring), `PYTHONPATH=/home/user/spektrafilm/src:/tmp/spkstubs`, and rebuild the
+    host-parity binaries before trusting any parity claim.
 
 ### Honesty rules (engineering integrity)
-10. **Never claim parity or tests pass without running them.** If you did not run the gate,
+11. **Never claim parity or tests pass without running them.** If you did not run the gate,
     say so. No "should pass."
-11. **Report failing output verbatim.** Paste the actual `FAIL` line / tolerance numbers.
+12. **Report failing output verbatim.** Paste the actual `FAIL` line / tolerance numbers.
     Do not summarize a failure as a success or hand-wave it.
-12. **Never fabricate parity numbers, file paths, line numbers, or citations.** Use the real
+13. **Never fabricate parity numbers, file paths, line numbers, or citations.** Use the real
     measured numbers from the repo (README.md 113-126) or run the test to get them.
-13. **Preserve UPSTREAM-UNVERIFIED claims as flagged-uncertain.** The film-physics reference
+14. **Preserve UPSTREAM-UNVERIFIED claims as flagged-uncertain.** The film-physics reference
     flags several items (the "Hanatos 2025" method has no located formal paper; the OFX
     whitepaper was unreadable; exact CC/grain constants came from porting docs not live
     profiles). Do not launder a flagged claim into asserted fact — keep the flag.
-14. **GPU is preview-only, never the export or parity path.** GPU float varies by vendor and
+15. **GPU is preview-only, never the export or parity path.** GPU float varies by vendor and
     is not bit-reproducible; the parity engine is CPU C++ only. `LutGpuPreview.kt` is an
     optional preview accelerator, default OFF. Never route `simulate`/export through GPU.
 
@@ -108,7 +113,7 @@ in spectral integrals), `gaussian`/`exponential_filter` (spatial convs), `interp
 `tonecurve`, `half`, and `parallel`.
 
 Profile/asset loaders: `profiles/profile.cpp` + `io/npy_lut.cpp`. Profiles + LUTs + ICC under
-`engine/spektra-core/src/main/assets/spektra/`. ~28 film/paper profiles, 21 built-in presets.
+`engine/spektra-core/src/main/assets/spektra/`. ~28 film/paper profiles, 28 built-in presets.
 
 See `references/film-emulation.md` for the physics and `references/parity-and-build.md` for the
 full build + CI gate.
@@ -117,7 +122,7 @@ full build + CI gate.
 
 ## Lightroom-mobile editor laws
 
-The editor (~27 Kotlin files in `app/src/main/java/com/spectrafilm/app/`) is a parametric,
+The editor (~56 Kotlin files in `app/src/main/java/com/spectrafilm/app/`) is a parametric,
 non-destructive Lightroom-style stack. Hard rules:
 
 - **Parametric, never pixel-baked.** Edits are a serializable `SpektraParams` snapshot; the
@@ -125,7 +130,7 @@ non-destructive Lightroom-style stack. Hard rules:
   source URI; `EditHistory.kt` is in-memory undo/redo.
 - **Presets/recipes are parameter snapshots, NOT LUTs.** `Presets.kt` round-trips every field
   to versioned JSON; "apply preset" pre-populates the param stack, it does not composite a
-  fixed image. `BuiltInPresets.kt` = 21 curated looks.
+  fixed image. `BuiltInPresets.kt` = 28 curated looks.
 - **Two-resolution proxy is THE rule, not an option.** Edit against the ~640 px preview; render
   full-res only on export.
 - **Never render on the main thread**, and never full-res during interaction. Decode + simulate
@@ -186,7 +191,9 @@ ANDROID_SDK_ROOT=/opt/android-sdk JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
 ## Reference files
 
 - `references/parity-and-build.md` — toolchain pins, full CI gate list, host-parity compile
-  recipe, JNI/lifecycle/threading contract, gotchas, open AUDIT items (inert params, tiling).
+  recipe + fast full-suite replay, the two-memo architecture, S4 parallelization rules, golden
+  generation discipline, benchmarking doctrine, JNI/lifecycle/threading contract, gotchas,
+  open AUDIT items (tiling).
 - `references/film-emulation.md` — spectral-vs-LUT, spectral upsampling lineage, the three
   stages mapped to C++ files, a glossary, and a flagged "Sourcing & uncertainty" section.
 - `references/lightroom-mobile.md` — editing model, real-time pipeline, Compose patterns,

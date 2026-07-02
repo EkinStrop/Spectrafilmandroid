@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — parity fixes, gamut compression, spatial decoupling + the speed pass 🔍⚡
+## Unreleased — targeting v0.8.0 (versionCode 10) — parity fixes, gamut compression, spatial decoupling + the speed pass 🔍⚡
 
 A codebase-wide review (`docs/CODE_REVIEW_2026-06-24.md`) and its top-priority fixes, the
 upstream-sync opt-in ports (PR #105), the gamut-compression activation + Kotlin hardening
@@ -8,6 +8,16 @@ backlog (PR #109), and the "exact + fast" pass (2026-07-02): per-effect spatial 
 the print-route spatial/grain enable, and engine memoization. The host parity suite grew
 26 → **33 gates**, all green; every default engine path stays byte-identical to the oracle
 except the corrections/enables explicitly listed below.
+
+### App waves (PRs #90–#103, merged before this cycle)
+- **Masking v1** — radial/linear masks plus luminance and color-range masks, 13 local ops
+  (including the Class-S spatial ops), draw-on-preview overlay, and eyedroppers.
+- **Lightroom-style export sheet** — JPEG/UltraHDR with quality + size options, PNG16, TIFF16,
+  TIFF32F, and scene-linear untagged TIFF32F.
+- **LUT export** — `.cube` + CLF v3, in 17/33/65 sizes.
+- **WB wave** — gray-point eyedropper, film-stock balance/virtual-85, auto-exposure default ON.
+- **Preset amount slider.**
+- **Onboarding** — help sheets + Basic/Advanced disclosure, slide-mode suggestion.
 
 ### Added
 - **Spatial-effect decoupling (parity fix).** Every spatial effect (DIR-coupler diffusion,

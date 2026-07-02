@@ -52,8 +52,9 @@ filters, the enlarger's dichroic filters and print exposure, grain (a stochastic
 sublayers and micro-structure), and the scanner. Changes preview live.
 
 **Edit like a photographer.** A tone curve (master plus per-channel red/green/blue), contrast,
-saturation and vibrance, and local masks — radial and gradient — that adjust exposure, color,
-clarity, and tone in just one part of the frame. Local edits sit on top of the film render; the
+saturation and vibrance, and local masks — radial, gradient, and luminance/color range with
+eyedroppers — that adjust exposure, color, clarity, texture, sharpness and tone in just one
+part of the frame. Local edits sit on top of the film render; the
 simulation underneath stays untouched.
 
 **Get white balance right.** An eyedropper sets neutral from a tap, warmth and tint work on any

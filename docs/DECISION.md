@@ -1,6 +1,8 @@
 # Decision Record — How we port Spektrafilm to Android
 
-Status: **Accepted** (milestone 0). Author: project lead. Date: 2026-05-29.
+Status: **Accepted** (M0), **superseded in part** — the ImageToolbox host was never vendored; the
+app shipped and remains standalone `:app` + `engine:spektra-core` through v0.8.0 (see the v0.1.0
+update below). Engine-in-C++/NDK + LibRaw decisions stand. Author: project lead. Date: 2026-05-29.
 
 ## Context
 

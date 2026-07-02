@@ -14,6 +14,11 @@
 > The remaining findings below (np_interp non-monotonic axis, `float_to_half` rounding, JNI input
 > color-space, and the Kotlin/UI items) are **not** addressed in this PR and are left as documented
 > follow-ups. See the CHANGELOG for the fix summary.
+>
+> **UPDATE 2026-07-02:** of the follow-ups, np_interp (`np_interp` gate), float_to_half RNE,
+> preset/recipe/diagnostics IO off-main, the undo restoring-flag window, GPU-LUT stale-texture
+> re-arm, and allocRotBuf Long-widening have since shipped; for the JNI input-color-space contract
+> and crop-anchor items, check docs/AUDIT.md for current status. Gate count is now 33.
 
 ## 1. Executive summary
 

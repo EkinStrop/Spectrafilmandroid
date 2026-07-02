@@ -46,7 +46,7 @@ header and mmaps the payload. The `.lut` binary is parsed per spektrafilm's
 ## Catalog & presets (loaded by the app, also under `spektra/`)
 - `catalog.json` — the 28-stock film/paper catalog (id, display name, group, ISO, era) the UI
   stock-picker reads. 1:1 with the `profiles/*.json` files. See `docs/FILM_STOCKS.md`.
-- `presets.json` — the 21 built-in look presets (film/print pairing + param tweaks). See
+- `presets.json` — the 28 built-in look presets (film/print pairing + param tweaks). See
   `docs/PRESETS.md`.
 
 ## Color filters (`filters/`)

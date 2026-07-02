@@ -42,6 +42,17 @@ GPU pipeline. CPU micro-opt alone won't close that; the gap is **architectural (
   all 65536 half patterns + the asset), 3.1× faster conversion → the one-time engine-creation LUT
   load drops ~36 ms → ~17 ms (host). One-time/cached startup cost, not a per-render lever.
 - **Proxy / half-size RAW decode** + fd decode — bounded memory on big files (#43/#44).
+- **S1 — film-density memo** on BOTH routes (Option-A spatial key; key completeness
+  test-enforced) — recompute filming only when a filming-affecting param changed.
+- **S2 — print-density memo** — output-only edits rerun `scan()` alone (works with grain ON).
+- **S3 — Kotlin retained-result grade cache** — grade-only edits do zero native work.
+- **S4 — serial-loop parallelization** (DIR-coupler develop, exposure→density interp, expose
+  tails via deterministic `parallel_for`) — cold scan 243 → 211 ms (−13%).
+
+Measured 2026-07-02 (512×512 medians, `SPK_NUM_THREADS=8` on the 4-core container): warm print
+edits 153–162 ms vs 402 ms cold; warm scan 144–159 ms vs 243 ms cold. Note the older 1200×900
+table above **predates the memos**; print stages alone are ~5 ms at 512², so the S2 win scales
+with resolution / enlarger paths / grain-ON.
 
 ## Staged plan (biggest lever first), with the parity cost of each
 
@@ -50,18 +61,18 @@ GPU pipeline. CPU micro-opt alone won't close that; the gap is **architectural (
 | 1 | **Vulkan compute** port of the per-pixel spectral kernels (expose/print/scan) | **10–50×** (the real Lightroom lever) | No (GPU rounding) | XL — needs device + a compute-shader port. *NB:* an experimental default-OFF OpenGL ES **3D-LUT loupe** (`app/.../LutGpuPreview.kt`) is already in the tree — a different technique (a baked pointwise-look LUT sampled by GLES graphics, grain/halation forced off), **not** this per-kernel compute port; it does not subsume this item. |
 | 2 | **Enlarger/expose spectral LUT** (`use_enlarger_lut` is now wired, opt-in/default-off; it LUT-accelerates the print expose integral like the scanner LUT — could extend to filming) | ~3–8× on the print route | No (~5e-5) | M–L, native |
 | 3 | **fp16 intermediate buffers** on the proxy path | ~1.5–2× + ½ memory/bandwidth | No (fp16) | M, native (NEON `__fp16`) |
-| 4 | **Per-stage caches** — recompute only the changed stage across edits (LR's `cr_*_cache`) | big for slider drags | Yes (cached, identical) | M, engine state |
+| 4 | **Per-stage caches** — ✅ SHIPPED (moved to "Already done" above: S1 film-density memo on both routes, S2 print-density memo, S3 Kotlin retained-result grade cache) | shipped: warm print edits 153–162 ms vs 402 cold; warm scan 144–159 vs 243 cold (512², 8 threads) | Yes (cached, identical) | done |
 | 5 | **Pause/refresh render on gesture** (LR `ICBPauseRendering`) | perceptual | Yes | S |
-| 6 | **Progressive pyramid render** (coarse→fine, LR `ICBSetRenderLevel`) | perceptual instant | Yes | L |
+| 6 | **Progressive pyramid render** (coarse→fine, LR `ICBSetRenderLevel`; a CPU coarse→fine two-pass progressive preview already shipped in v0.5.0 — this is the deeper native model). This doc owns the item; backlog copies point here. | perceptual instant | Yes | L |
 
 **oneTBB:** intentionally *not* adopted — our fork-join already provides the parallelism and is
 thread-count-invariant (a parity requirement); adding TBB is a dependency with no parity-safe win.
 **LiteRT/ML:** a *feature* track (subject/sky masking), not performance — separate from this doc.
 
 ## Recommended sequence
-The parity-safe wins (#4, #5) ship first (real interactive smoothness, zero precision risk).
-Then the precision decision below unlocks #2/#3 (proxy-only approximation) and ultimately #1 (GPU),
-which is the only thing that truly reaches Lightroom-class speed.
+#4 shipped (S1/S2/S3 memos + grade cache). Remaining parity-safe win is #5 (pause/refresh),
+then the precision decision below unlocks #2/#3 (proxy-only approximation) and ultimately #1
+(GPU), which is the only thing that truly reaches Lightroom-class speed.
 
 ## Decision (adopted)
 **Proxy approximate, export exact** — Lightroom's model. Interactive *preview* renders may use

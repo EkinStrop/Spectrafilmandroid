@@ -35,8 +35,8 @@ The engine C++ under `engine/spektra-core/src/main/cpp/**` is **bit-exact parity
 spektrafilm oracle (pinned SHA `c1d0e44`) — within tol (`max_abs ≤ 1e-4`, `rms ≤ 1e-5`) **and**
 byte-identical across thread counts. Any engine edit must keep the 33-test host parity suite green
 (authoritative argv in `.github/workflows/ci.yml`; annotated list in CLAUDE.md — the count grows,
-always recount from ci.yml) and, for a new feature, ship an oracle golden + a strict default-no-op
-+ a thread-invariance check.
+always recount from ci.yml) and, for a new feature, ship an oracle golden plus a strict
+default-no-op plus a thread-invariance check.
 **This is non-negotiable and it is what makes the film look trustworthy** — users love the
 authenticity *because* it is faithful (`NateWeatherly: "there is NOTHING else like this… results
 absolutely look like film"`). Never trade the look for convenience.

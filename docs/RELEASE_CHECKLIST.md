@@ -5,7 +5,8 @@ builds a production-signed APK from keystore secrets and publishes it (plus a `.
 GitHub Release asset. **APKs are not committed to the repository** — there is no `dist/` directory
 and you should never copy a built APK into the repo.
 
-Current shipping version: **v0.8.0 / versionCode 10** (`minSdk 24`, `targetSdk`/`compileSdk 34`).
+Current in-tree version: **v0.8.0 / versionCode 10** (`minSdk 24`, `targetSdk`/`compileSdk 34`);
+latest released tag is **v0.7.0**.
 (The R8 release smoke was last device-validated 2026-06-04 on 0.7.x — the 0.8.0 minified build
 still needs its pre-tag device smoke.)
 

@@ -54,7 +54,7 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 - Granular reset scopes — `ICBResetCropAndGeometryToDefaultState`. (S)
 
 ## G. Compare / before-after / discovery
-- ✅ **Before/after toggle** — shipped (compare toggle). Split view remains an optional remainder. (S)
+- ✅ **Before/after** — shipped as a draggable split/wipe (`CompareSlider` in `Viewer.kt`). (S)
 - Inline interactive tutorials ("Discover") — `discover_*_step_view_holder.xml`, `tutorials/content/tut_*.json`. (M)
 - Per-feature onboarding gates — `fragment_masking_onboarding.xml` (extend our `CoachMarks`). (S)
 

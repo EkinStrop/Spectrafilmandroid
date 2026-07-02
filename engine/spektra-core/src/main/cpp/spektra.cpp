@@ -992,24 +992,20 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         pparams.grain_density_min[1] = static_cast<double>(p->grain_density_min[1]);
         pparams.grain_density_min[2] = static_cast<double>(p->grain_density_min[2]);
     }
-    // Spatial branch toggle for the print route (mirrors the negative scan:
-    // deactivate_spatial_effects=False enables the spatial filters). Driven by
-    // halation_active, matching run_scan_film.
-    const bool print_spatial = (p->halation_active != 0);
+    // Halation/scatter gate for the print route's filming step. halation_active
+    // gates ONLY halation (its UI meaning), mirroring run_scan_film; every other
+    // spatial effect self-gates on its own params (zero = inert).
+    const bool print_halation_on = (p->halation_active != 0);
     // Stochastic branch toggle for the print route (mirrors the negative scan:
-    // deactivate_stochastic_effects=False enables grain + viewing glare). Used to
-    // gate the print-route viewing glare below.
+    // deactivate_stochastic_effects=False enables grain + viewing glare).
     const bool print_stochastic = (p->grain_active != 0);
-    // Enlarger optical diffusion filter (issue #6 exposed-but-inert param),
-    // applied in print_expose on the float64 print irradiance before the final
-    // log10. Gated on the spatial branch (the oracle's digest_params zeroes
-    // enlarger.diffusion_filter.active under deactivate_spatial_effects=True).
-    // Inactive by default -> strict no-op. pixel_size_um from the resize service
-    // drives the µm->pixel conversion when active.
+    // Enlarger optical diffusion filter, applied in print_expose on the float64
+    // print irradiance before the final log10. Self-gated on
+    // enlarger_diffusion_active (the oracle's only gate — deactivate_spatial_effects
+    // is expressed by zeroing .active). Inactive by default -> strict no-op.
+    // pixel_size_um from the resize service drives the µm->pixel conversion.
     apply_user_diffusion_filter(pparams.diffusion_filter, p, /*is_camera=*/false);
-    if (!print_spatial) pparams.diffusion_filter.active = false;
-    if (pparams.diffusion_filter.active)
-        pparams.pixel_size_um = resize_pixel_size_um;
+    pparams.pixel_size_um = resize_pixel_size_um;
 
     // Scanner BLACK/WHITE correction (print route). Active only when a correction is
     // enabled AND the print paper is NEGATIVE (color_reference.py's
@@ -1060,11 +1056,12 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     }
 
     // 4) Filming stage (rgb -> film density_cmy), reusing the bit-exact port.
-    //    The print route runs the negative with spatial+stochastic effects off
-    //    (matching the print_portra parity toggles), so only the pointwise
-    //    DIR-coupler user params apply here.
+    //    The print route now runs the SAME per-effect-gated filming as the scan
+    //    route — the oracle runs one FilmingStage on both routes, so the
+    //    negative carries its halation / scatter / DIR diffusion / lens blur /
+    //    grain into the print. Each effect self-gates on its own params.
     spk::FilmingParams fparams = spk::digest_filming_params(
-        film.is_negative(), /*spatial_effects=*/false,
+        film.is_negative(), /*spatial_effects=*/true,
         !film.stock.empty() ? film.stock.c_str() : p->film_profile);
     fparams.exposure_compensation_ev = p->exposure_compensation_ev;
     const float fg = p->density_curve_gamma != 0.0f ? p->density_curve_gamma : 1.0f;
@@ -1072,12 +1069,21 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     fparams.density_curve_gamma[1] = fg;
     fparams.density_curve_gamma[2] = fg;
     apply_user_dir_couplers(fparams.dir_couplers, p);
-    // The print route still runs the negative-filming step spatial-OFF (the print
-    // parity goldens keep deactivate_spatial_effects=True): force the DIR
-    // diffusion pointwise (size 0 = the oracle's deactivate zeroing) and keep the
-    // camera diffusion filter off. E2 (print-route spatial) lifts this.
-    fparams.dir_couplers.diffusion_size_um = 0.0;
-    fparams.diffusion_filter.active = false;
+    apply_user_diffusion_filter(fparams.diffusion_filter, p, /*is_camera=*/true);
+    fparams.lens_blur_um = static_cast<double>(p->lens_blur_um);
+    fparams.pixel_size_um = resize_pixel_size_um;
+    if (print_stochastic) {
+        // grain_active -> AgX particle grain inside develop(), exactly as the
+        // scan route wires it. Deterministic seed; stays serial.
+        spk::digest_grain_params(fparams);
+        apply_user_grain(fparams.grain, p);
+    }
+    if (print_halation_on) {
+        spk::digest_halation_params(fparams, film.use.c_str(),
+                                    film.antihalation.c_str(), true);
+        // halation user params (everything except the preset-baked sigma/strength).
+        apply_user_halation(fparams.halation, p);
+    }
     // Highlight boost is NOT a spatial effect (it runs in filming.expose regardless of
     // deactivate_spatial_effects). The print route's negative-filming runs spatial-OFF,
     // so thread the boost params in directly; apply_highlight_boost gates on
@@ -1089,29 +1095,28 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
 
     // `rgb` (float64, crop/rescale applied) built by preprocess_geometry above.
 
-    // Print-route film_density_cmy memo. On this route filming runs spatial-OFF and
-    // grain-OFF (set above: dir spatial=false, diffusion_filter.active=false, and
-    // run_print never touches grain), so expose()+develop() is a PURE deterministic
-    // function of (rgb, width, height, color_space, filming params) with NO
-    // stochastic/grain state. We can therefore memoize the developed film_density_cmy
-    // in a single content-hashed slot on the engine and skip expose+develop on the
-    // next call whose filming inputs are byte-identical (a downstream-only edit such
-    // as enlarger filters, scanner, or tone curve). Everything downstream runs
-    // unchanged on every call, so the cache is transparent and bit-exact.
+    // Print-route film_density_cmy memo. With grain off, expose()+develop() is a
+    // PURE deterministic function of (rgb, width, height, color_space, filming
+    // params) — the deterministic spatial effects are fixed convolutions. The memo
+    // key does not yet fold the spatial SHAPE params (S1 extends it), so only the
+    // all-spatial-off composition is cached; everything downstream runs unchanged
+    // on every call, so the cache is transparent and bit-exact.
     //
     // Cache is BYPASSED (always recompute) when:
     //   (a) a debug tap (log_raw / film_density_cmy) is requested — keeps the tap
-    //       path byte-identical to today and avoids caching tap-only renders, AND
-    //   (b) DEFENSIVELY, if the print-route filming step would ever run with the
-    //       spatial OR grain branch on — converts a future parity break into a safe
-    //       bypass rather than serving a stochastic/spatial result from the memo.
+    //       path byte-identical and avoids caching tap-only renders, OR
+    //   (b) any filming-side spatial effect is live (halation, camera diffusion,
+    //       lens blur, DIR spatial diffusion) — their shape params are not yet in
+    //       the key, so a shape-only edit would alias a stale entry, OR
+    //   (c) grain is on (stochastic).
     std::vector<float> film_density_cmy(static_cast<size_t>(npix) * 3);
     const bool tap_bypass = (tap_log_raw != nullptr) || (tap_film_density_cmy != nullptr);
-    // print_spatial/print_stochastic are the print route's branch toggles; on this
-    // route the filming step is run pointwise regardless, but if either branch is on
-    // we refuse to cache (and the recompute path below is unaffected).
-    const bool stochastic_or_spatial = print_spatial || print_stochastic;
-    const bool use_film_cache = !tap_bypass && !stochastic_or_spatial;
+    const bool print_filming_spatial =
+        print_halation_on || (p->camera_diffusion_active != 0) ||
+        (p->lens_blur_um > 0.0f) ||
+        (p->dir_couplers_active != 0 && p->dir_diffusion_size_um > 0.0f);
+    const bool use_film_cache =
+        !tap_bypass && !print_filming_spatial && !print_stochastic;
 
     bool film_cache_hit = false;
     if (use_film_cache) {
@@ -1193,15 +1198,12 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         sparams.glare_blur = p->print_glare_blur;
     }
     // Scanner lens blur + unsharp on the print route (scanning.py runs the same
-    // _apply_blur_and_unsharp on both routes). Part of the spatial branch (the
-    // oracle zeroes scanner.lens_blur / unsharp under deactivate_spatial_effects),
-    // so honoured only when the print spatial branch is on; default 0 => no-op, so
-    // the print parity goldens stay bit-exact.
-    if (print_spatial) {
-        sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
-        sparams.unsharp_sigma = p->scanner_unsharp[0];
-        sparams.unsharp_amount = p->scanner_unsharp[1];
-    }
+    // _apply_blur_and_unsharp on both routes). Each self-gates inside scan()
+    // (sigma > 0, amount > 0, blur > 0) exactly like the oracle; the
+    // deactivate_spatial_effects debug switch is expressed by passing zeros.
+    sparams.lens_blur = static_cast<double>(p->scanner_lens_blur);
+    sparams.unsharp_sigma = p->scanner_unsharp[0];
+    sparams.unsharp_amount = p->scanner_unsharp[1];
     // OPT-IN scanner 3D-LUT acceleration on the print-scan route (same
     // settings.use_scanner_lut gate; scan_film == false so scan() picks the print
     // density-curve domain bounds). Default 0 => never constructed, print goldens

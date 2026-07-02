@@ -164,6 +164,19 @@ int main(int argc, char** argv) {
         ok &= check_identical("scan_film+grain+halation", r1, r8);
     }
 
+    // 4) PRINT route with grain + halation ON: the print-route spatial + grain
+    //    filming branch (the negative's halation/scatter/DIR diffusion + AgX
+    //    grain now feed the enlarger). Same thread-invariance contract.
+    {
+        spk_params p = base;
+        p.scan_film = 0;
+        p.grain_active = 1;
+        p.halation_active = 1;
+        ok &= simulate_with_threads(eng, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(eng, &in_img, &p, 8, &r8);
+        ok &= check_identical("print+grain+halation", r1, r8);
+    }
+
     spk_engine_destroy(eng);
     std::printf("%s\n", ok ? "ALL PASS" : "FAIL");
     return ok ? 0 : 1;

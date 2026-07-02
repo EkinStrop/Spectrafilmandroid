@@ -290,6 +290,13 @@ jobs:
           # halation off, discrimination vs the with-halation lensblur golden, and
           # SPK_NUM_THREADS 1-vs-8 byte-identical output.
           build_run test_spatial_decouple_e2e "$ASSET" "$G/scan_portra_lensblur_nohalation" tests/scan_portra_input_rgb.f64 "$G"
+          # PRINT-ROUTE SPATIAL BRANCH: the print route's filming step used to be
+          # hard-forced spatial-OFF; the oracle runs the SAME FilmingStage on both
+          # routes. Golden = print route with halation/scatter + DIR spatial
+          # diffusion ON (grain/glare off -> deterministic), pinned to oracle
+          # c1d0e44. Pre-fix the engine sat ~1.8e-2 from this golden. Also asserts
+          # spatial on-vs-off and SPK_NUM_THREADS 1-vs-8 byte-identical output.
+          build_run test_print_spatial_e2e "$ASSET" "$G/print_portra_spatial" tests/scan_portra_input_rgb.f64 "$G"
           exit $fail
 
   # ---------------------------------------------------------------------------

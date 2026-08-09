@@ -51,6 +51,18 @@ int parallel_num_threads();
 // spawn overhead dominating (e.g. small preview renders).
 constexpr int kParallelMinChunk = 8192;
 
+// Effective minimum chunk. Honours the SPK_PARALLEL_MIN_CHUNK environment override
+// (clamped to >= 1) when set; otherwise kParallelMinChunk. Unset — the shipping
+// default — is byte-identical to the previous behaviour.
+//
+// Why this exists: a fixture SMALLER than the minimum chunk collapses to exactly one
+// chunk at every thread count, so parallel_for takes the serial path and a
+// thread-invariance test over it cannot observe a chunking bug — the gate passes
+// vacuously. The 64x64 (4096-pixel) parity fixture is such a case against the 8192
+// default. Setting this override lets the test force genuine multi-chunk execution
+// on the existing fixture, so 1-vs-N really compares split work against serial work.
+int parallel_min_chunk();
+
 // Split [begin, end) into up to parallel_num_threads() contiguous, disjoint
 // chunks and run body(chunk_begin, chunk_end) for each — workers on their own
 // threads, the first chunk on the calling thread. Chunk boundaries are a pure
@@ -65,7 +77,8 @@ void parallel_for(int begin, int end, const Body& body) {
 
     int nthreads = parallel_num_threads();
     if (nthreads > 1) {
-        const int max_by_work = (count + kParallelMinChunk - 1) / kParallelMinChunk;
+        const int min_chunk = parallel_min_chunk();
+        const int max_by_work = (count + min_chunk - 1) / min_chunk;
         nthreads = std::min(nthreads, max_by_work < 1 ? 1 : max_by_work);
     }
     if (nthreads <= 1) {

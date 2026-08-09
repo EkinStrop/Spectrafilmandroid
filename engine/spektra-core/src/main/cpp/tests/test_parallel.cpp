@@ -100,6 +100,16 @@ int main(int argc, char** argv) {
     std::string asset_dir  = argc > 1 ? argv[1] : kAssetDir;
     std::string input_path = argc > 2 ? argv[2] : kInputF64;
 
+    // Force genuine multi-chunk execution on this fixture.
+    //
+    // The fixture is 64x64 = 4096 pixels, which is BELOW kParallelMinChunk (8192).
+    // parallel_for therefore clamps to a single chunk and takes the serial path at
+    // EVERY thread count, so without this override the thread-invariance assertions
+    // below compare serial output against serial output and cannot fail — the gate
+    // passes vacuously for the very loops it exists to protect. Lowering the minimum
+    // chunk makes 1-vs-N a real comparison of split work against serial work.
+    // Production behaviour is untouched: the override is only set here, in the test.
+    ::setenv("SPK_PARALLEL_MIN_CHUNK", "256", /*overwrite=*/1);
 
     // The fixture is a 64x64x3 float64 image (matches make_test_image(64)).
     const int width = 64, height = 64;

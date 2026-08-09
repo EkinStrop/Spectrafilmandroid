@@ -19,4 +19,14 @@ int parallel_num_threads() {
     return hw == 0 ? 1 : static_cast<int>(hw);
 }
 
+int parallel_min_chunk() {
+    // Test-only override. Unset (the shipping default) yields kParallelMinChunk, so
+    // production behaviour — and therefore every golden — is unchanged.
+    if (const char* env = std::getenv("SPK_PARALLEL_MIN_CHUNK")) {
+        const int n = std::atoi(env);
+        if (n >= 1) return n;
+    }
+    return kParallelMinChunk;
+}
+
 }  // namespace spk

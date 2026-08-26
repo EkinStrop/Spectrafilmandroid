@@ -58,7 +58,7 @@
 - **Host parity suite was 35 gates then** (now 36 — see Current state above), all green (argv
   authoritative in `.github/workflows/ci.yml`);
   `SPK_NUM_THREADS` 1≡8 byte-identical (oklrab compress is serial+stateless); NDK r27 3-ABI build
-  path unchanged. App **0.8.0 / versionCode 10**.
+  path unchanged. App **0.9.0 / versionCode 11** (bumped for the 0.9.0 release, issue #129).
 - **This branch now carries the unmerged oklrab commits (slice 2) on top of `origin/main` + the
   `1174fd8` docs commit.** Open a NEW draft PR for them; the remote branch auto-deletes on merge and
   recreates with a plain push. Never stack new work on already-merged history.

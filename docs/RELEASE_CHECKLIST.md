@@ -5,10 +5,10 @@ builds a production-signed APK from keystore secrets and publishes it (plus a `.
 GitHub Release asset. **APKs are not committed to the repository** — there is no `dist/` directory
 and you should never copy a built APK into the repo.
 
-Current in-tree version: **v0.8.0 / versionCode 10** (`minSdk 24`, `targetSdk`/`compileSdk 34`);
-latest released tag is **v0.7.0**.
-(The R8 release smoke was last device-validated 2026-06-04 on 0.7.x — the 0.8.0 minified build
-still needs its pre-tag device smoke.)
+Current in-tree version: **v0.9.0 / versionCode 11** (`minSdk 24`, `targetSdk`/`compileSdk 34`);
+latest released tag is **v0.8.0**.
+(The R8 release smoke was last device-validated 2026-06-04 on 0.7.x — the 0.9.0 minified build
+gets its pre-tag device smoke from the manual-dispatch `r8-smoke.yml` artifact.)
 
 ---
 
@@ -45,7 +45,7 @@ The single `build-signed-apk` job (Ubuntu runner) then:
 
 ## 2. Pre-tag checklist
 
-- [ ] Bump `versionCode` and `versionName` in `app/build.gradle.kts` (currently `10` / `"0.8.0"`).
+- [ ] Bump `versionCode` and `versionName` in `app/build.gradle.kts` (currently `11` / `"0.9.0"`).
 - [ ] Update `CHANGELOG.md` for the new version.
 - [ ] Note: the release build now runs **R8** (`isMinifyEnabled = true`, `app/build.gradle.kts:53`).
   This is **Stage 1 — shrink only, `-dontobfuscate`** (`app/proguard-rules.pro:2`), with explicit

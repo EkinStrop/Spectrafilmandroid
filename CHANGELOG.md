@@ -1,14 +1,30 @@
 # Changelog
 
-## Unreleased — targeting v0.8.0 (versionCode 10) — parity fixes, gamut compression, spatial decoupling + the speed pass 🔍⚡
+## v0.9.0 (versionCode 11) — 2026-08-26 — parity fixes, gamut compression, spatial decoupling, fork engine adoption + the speed pass 🔍⚡
 
-A codebase-wide review (`docs/CODE_REVIEW_2026-06-24.md`) and its top-priority fixes, the
+Everything landed after the v0.8.0 release (2026-06-09): a codebase-wide review
+(`docs/CODE_REVIEW_2026-06-24.md`) and its top-priority fixes, the
 upstream-sync opt-in ports (PR #105), the gamut-compression activation + Kotlin hardening
-backlog (PR #109), and the "exact + fast" pass (2026-07-02): per-effect spatial decoupling,
-the print-route spatial/grain enable, engine memoization, and the Oklch perceptual
-output-gamut option (PR #111). The host parity suite grew 26 → **34 gates**, all green; every
+backlog (PR #109), the "exact + fast" pass (2026-07-02): per-effect spatial decoupling,
+the print-route spatial/grain enable, engine memoization, and the Oklch/Oklrab perceptual
+output-gamut options (PRs #111/#112) — plus the VirtuaTOA fork engine adoption (PR #130,
+below). The host parity suite grew 26 → **36 gates**, all green; every
 default engine path stays byte-identical to the oracle except the corrections/enables
 explicitly listed below.
+
+### Adopted from the VirtuaTOA camera fork (PR #130, 2026-08-26; verified + hardened, issues #118/#125)
+- **Parallel load-balanced grain** — fixed 8192-px blocks with per-block SplitMix64 seeds and
+  dynamic scheduling: grain-only 12 MP measured 114.8 s → 35.2 s (3.26×) on 4 cores, byte-identical
+  for any worker count (proven by `memcmp` at 12 MP and a new multi-block `test_parallel` scenario).
+  ⚠ **The grain field differs from ≤ v0.8.0 for identical (image, seed)** — old exports are not
+  grain-bit-reproducible; output stays statistically inside the oracle's bands (`test_grain`).
+- **Spectral 3D-LUT memo cache** (scanner + enlarger) — preview's per-frame LUT rebuilds are
+  memoized behind exact, length-prefixed byte keys; new CI gate `test_lut_cache_e2e` (suite 35 → 36).
+- **Debug native builds now compile `-O2`** (previously an unoptimized `-g`-only default).
+- **AE-off `.cube` bake fix + `spk_meter_exposure_ev`** — the bake no longer meters the synthetic
+  identity lattice; the experimental GPU preview bakes an sRGB-shaped lattice and applies the
+  engine-metered exposure gain (exports stay linear/unshaped); shaper path covered by a new
+  `test_bake_lut` property case.
 
 ### App waves (PRs #90–#103, merged before this cycle)
 - **Masking v1** — radial/linear masks plus luminance and color-range masks, 13 local ops
@@ -45,7 +61,8 @@ explicitly listed below.
   "Oklch (perceptual, keep hue)" in the Output-gamut-compression dropdown; recipes round-trip by
   ordinal. Default-OFF is strict byte-identical; the active path is bit-exact to the oracle
   (`27bd085`). New gate `test_gamut_out_oklch`. First slice of the perceptual output-gamut work
-  (P2 #6); `oklrab`/`jzazbz`/`cam16ucs` remain reserved enum slots (unported).
+  (P2 #6); the second slice, **Oklrab** (Oklch indexed by Ottosson's rebased lightness Lr), landed
+  in PR #112 with gate `test_gamut_out_oklrab`; `jzazbz`/`cam16ucs` remain reserved slots (unported).
 - **Highlight boost trio** (`boost_ev`/`boost_range`/`protect_ev`) ported into `expose`
   (pre-clip highlight reconstruction; gate `test_highlight_boost_e2e`).
 - **Print density-curve morph (s023), opt-in / default-OFF.** First feature from the upstream-sync

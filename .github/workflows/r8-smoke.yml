@@ -1,0 +1,72 @@
+# Manual-dispatch build of the R8-minified release APK for on-device smoke
+# testing BEFORE tagging a release. Rationale: `isMinifyEnabled = true` is not
+# exercised by the CI `android` job (debug build, minify off), and a wrong R8
+# keep-rule fails only as a runtime crash or black export — so the repo
+# convention requires an on-device smoke test of a minified build before any
+# `v*` tag (CLAUDE.md, docs/AUDIT.md §D, issue #129).
+#
+# Without keystore.properties in the repo root the release build falls back to
+# DEBUG signing (app/build.gradle.kts), so the artifact installs on a device
+# that already has the debug build — it is a test artifact, never a release.
+# The real signed release still comes exclusively from release.yml on tag push.
+#
+# Added with explicit owner authorization on issue #129 (workflow edits are
+# otherwise out of bounds for agents per HANDOFF.md).
+name: R8 smoke APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  r8-smoke:
+    name: Build R8-minified release APK (debug-signed fallback)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK + CMake + build-tools
+        # Same pins as ci.yml: NDK r27 for 16 KB-aligned native LOAD segments,
+        # build-tools 35 for zipalign -P 16.
+        run: sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "build-tools;35.0.0"
+
+      - name: Assemble release APK (R8 minified)
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Verify 16 KB page compatibility (Android 15)
+        # Same two checks as the ci.yml debug gate, on the RELEASE APK:
+        #   1. Every bundled .so sits at a 16 KB-aligned offset in the APK zip.
+        #   2. Every 64-bit .so has 16 KB-aligned PT_LOAD segments.
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          # zipalign -c exits 0 when every entry is aligned, non-zero otherwise.
+          # (Don't grep its stdout — the tool prints "succesful", misspelled.)
+          "$BT/zipalign" -c -v -P 16 4 "$APK"
+          rm -rf /tmp/apk16 && mkdir -p /tmp/apk16
+          unzip -oq "$APK" 'lib/arm64-v8a/*' 'lib/x86_64/*' -d /tmp/apk16
+          bad=0
+          for so in $(find /tmp/apk16/lib -name '*.so'); do
+            a=$(readelf -lW "$so" | awk '/LOAD/{print $NF; exit}')
+            if [ "$a" != "0x4000" ]; then echo "NOT 16KB-aligned: ${so#/tmp/apk16/} ($a)"; bad=1; fi
+          done
+          [ "$bad" = 0 ] && echo "All 64-bit native libs are 16 KB-aligned."
+          exit $bad
+
+      - name: Upload R8 smoke APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Spektrafilm-r8-smoke-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

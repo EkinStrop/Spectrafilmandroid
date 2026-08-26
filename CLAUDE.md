@@ -134,7 +134,7 @@ keystore secrets on a `v*` tag push and creates the GitHub Release.
 
 ## Conventions / gotchas
 
-- Current version: `versionCode 10` / `versionName 0.8.0`, `minSdk 24`, `targetSdk`/`compileSdk 34`.
+- Current version: `versionCode 11` / `versionName 0.9.0`, `minSdk 24`, `targetSdk`/`compileSdk 34`.
   ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`.
 - Commit with `-c commit.gpgsign=false` (the signing server rejects signing here).
 - Release signing: drop `keystore.properties` (`storeFile`/`storePassword`/`keyAlias`/`keyPassword`)

@@ -363,14 +363,67 @@ const char* spk_status_str(spk_status);
  * upsampling, density curves, pointwise DIR couplers, printing, scanning, and the
  * output color-space transform. This is also noted in the `.cube` header.
  *
+ * AUTO-EXPOSURE IS FORCED OFF, AND THE CALLER MUST SUPPLY THE GAIN. A pointwise
+ * LUT cannot carry auto-exposure: AE meters the whole image to derive one global
+ * gain, and the bake's input is a synthetic identity lattice, not an image. The
+ * emitted LUT is therefore the pure pointwise transform at UNITY GAIN, and a
+ * caller feeding it real pixels must apply the exposure gain to those pixels
+ * BEFORE the lookup or the scene lands in the wrong region of the film's density
+ * curve (dark, with lifted shadows — the toe). Baking with AE left on meters the
+ * lattice and bakes a meaningless gain; that was a real bug, fixed 2026-08.
+ *
  * The `.cube` text (LUT_3D_SIZE N, TITLE, DOMAIN_MIN/MAX, N^3 RGB triples in
  * blue-fastest / red-slowest order) is written NUL-terminated into `out_text`.
  * `*needed` is always set to the required buffer size (including the NUL); if
  * `out_text` is null or `out_cap` is too small, returns SPK_ERR_BAD_ARGS so the
  * caller can resize and retry (the bake still runs to size it).
  */
+/*
+ * INPUT SHAPER (`shaper`): 0 = none, 1 = sRGB transfer.
+ *
+ * With no shaper the lattice is spaced EVENLY IN LINEAR LIGHT, which spends almost all
+ * of its resolution on highlights: at size 17 with the engine's 0.184 midgray, only
+ * about three lattice points fall below mid-grey, so the film curve's toe — where most
+ * of a photograph lives — is approximated by straight lines between three samples.
+ *
+ * With shaper 1 the lattice is spaced evenly in sRGB-ENCODED space instead (the entries
+ * are shaper^-1(i/(n-1))), putting roughly eight points below mid-grey at the same size.
+ * A caller MUST then apply the same transfer to its pixels before looking up.
+ *
+ * Shaper 0 is the default for a reason: a `.cube` file carries no shaper metadata, so a
+ * LUT exported for other software has to stay in the linear domain it advertises. Shaper
+ * 1 is for this app's own GPU preview, where both ends are under our control.
+ */
 spk_status spk_bake_cube_lut(spk_engine*, const spk_params*, int lut_size,
+                             int32_t shaper,
                              char* out_text, size_t out_cap, size_t* needed);
+
+/*
+ * Meter `in` and return the auto-exposure compensation in EV that a render of the
+ * SAME image with the SAME params would apply, WITHOUT rendering anything. The
+ * corresponding linear gain is 2**ev. Returns 0.0 EV (unity gain) when
+ * params->auto_exposure is off, or when the metering method string is
+ * unrecognised — both matching the render path exactly.
+ *
+ * WHY THIS EXISTS. spk_bake_cube_lut emits a pointwise LUT at unity gain, because
+ * a 3D LUT cannot carry auto-exposure (AE is a function of the whole image; the
+ * bake's input is a synthetic lattice). Anything applying that LUT to real pixels
+ * must therefore supply the gain itself, and it has to be the SAME gain the
+ * engine would use or the LUT preview misreports brightness. This entry point is
+ * how a caller gets that number instead of reimplementing the metering and
+ * drifting from it: internally it runs spk::apply_auto_exposure — the identical
+ * function preprocess_geometry calls — on a scratch copy and returns its EV.
+ *
+ * The metering itself always runs on a max-256 nearest downscale (small_preview),
+ * so feeding a proxy rather than the full-resolution image changes the result
+ * only marginally — which is what makes a viewfinder-metered gain usable for a
+ * full-resolution capture of the same scene.
+ *
+ * PURE READ: no engine state is mutated and `in` is not modified. Additive — no
+ * existing code path changed, so the parity goldens are untouched by construction.
+ */
+spk_status spk_meter_exposure_ev(spk_engine*, const spk_image* in,
+                                 const spk_params*, double* out_ev);
 
 #ifdef __cplusplus
 } /* extern "C" */

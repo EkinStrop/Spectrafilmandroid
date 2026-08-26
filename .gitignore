@@ -43,3 +43,6 @@ __pycache__/
 # Kotlin/CMake incremental caches
 .kotlin/
 **/.cxx/
+
+# Ephemeral agent worktrees (Claude Code isolation)
+.claude/worktrees/

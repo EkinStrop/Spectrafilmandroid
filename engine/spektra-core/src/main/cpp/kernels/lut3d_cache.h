@@ -29,18 +29,29 @@
  * sample function and its grid construction consume, in the caller's own units
  * (raw IEEE-754 object representations, not rounded/derived summaries), plus a
  * per-kind tag. Keys are compared EXACTLY (byte-for-byte), never hashed, so
- * there is no collision risk — a stale reuse would require two genuinely
- * identical input sets, which by definition produce the same LUT. Anything the
- * sample function reads that is NOT folded into the key is a latent
- * wrong-render bug, so fold conservatively: a superset of what is read is safe,
- * a subset is not. Compile-time constants (the CIE CMFs, the D50 scan
- * illuminant) cannot vary between calls and need no fold.
+ * there is no hash-collision risk. Anything the sample function reads that is
+ * NOT folded into the key is a latent wrong-render bug, so fold conservatively:
+ * a superset of what is read is safe, a subset is not. Compile-time constants
+ * (the CIE CMFs, the D50 scan illuminant) cannot vary between calls and need
+ * no fold.
+ *
+ * FRAMING RULE: every appended segment (tag or value block) is LENGTH-PREFIXED
+ * with a 4-byte little-endian byte count ahead of its payload. Bare
+ * concatenation would let two DISTINCT input sequences alias onto one byte
+ * string whenever a segment boundary shifts but the total bytes agree (e.g. a
+ * caller folding {N doubles, M doubles} vs {N+1, M-1} — plausible when two
+ * profile arrays are keyed back-to-back and their lengths co-vary). With the
+ * prefix, segment boundaries are part of the key, so equal keys imply the same
+ * sequence of segments with the same contents — restoring "equal key => same
+ * inputs => same LUT" without any per-caller care. Keys are process-internal
+ * and never persisted, so this format can change freely between builds.
  */
 #ifndef SPEKTRA_KERNELS_LUT3D_CACHE_H_
 #define SPEKTRA_KERNELS_LUT3D_CACHE_H_
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <list>
 #include <map>
 #include <memory>
@@ -51,26 +62,44 @@
 
 namespace spk {
 
-// Append the raw object representation of `n` values of T to `key`. The exact
-// IEEE-754 bytes are folded (not a formatted/rounded rendering), so float
-// jitter can never alias two distinct inputs onto one entry.
+// Segment header (see FRAMING RULE above): a 4-byte little-endian byte count,
+// serialized bytewise so the key format is host-endianness-independent.
+// uint32_t is ample — segments are tags and small spectral/param arrays, orders
+// of magnitude below 4 GiB.
+inline void lut_key_append_length_(std::string* key, size_t byte_count) {
+    const uint32_t len = static_cast<uint32_t>(byte_count);
+    const char b[4] = {static_cast<char>(len & 0xFFu),
+                       static_cast<char>((len >> 8) & 0xFFu),
+                       static_cast<char>((len >> 16) & 0xFFu),
+                       static_cast<char>((len >> 24) & 0xFFu)};
+    key->append(b, 4);
+}
+
+// Append one length-prefixed segment holding the raw object representation of
+// `n` values of T. The exact IEEE-754 bytes are folded (not a
+// formatted/rounded rendering), so float jitter can never alias two distinct
+// inputs onto one entry.
 template <typename T>
 inline void lut_key_append(std::string* key, const T* values, size_t n) {
+    lut_key_append_length_(key, n * sizeof(T));
     const char* b = reinterpret_cast<const char*>(values);
     key->append(b, n * sizeof(T));
 }
 
 template <typename T>
 inline void lut_key_append(std::string* key, const T& value) {
-    lut_key_append(key, &value, 1);
+    lut_key_append(key, &value, 1);  // delegates: one prefix, never two
 }
 
-// Append a NUL-terminated kind tag (e.g. "scan3d"). Every caller must start its
-// key with a tag unique to its LUT kind so two kinds can share one cache with
-// no chance of aliasing.
+// Append a kind tag (e.g. "scan3d") as a length-prefixed segment. The length
+// covers exactly strlen(tag) bytes — no NUL terminator is written, since the
+// prefix already delimits the segment. Every caller must start its key with a
+// tag unique to its LUT kind so two kinds can share one cache with no chance
+// of aliasing.
 inline void lut_key_append_tag(std::string* key, const char* tag) {
-    key->append(tag);
-    key->push_back('\0');
+    const size_t n = std::strlen(tag);
+    lut_key_append_length_(key, n);
+    key->append(tag, n);
 }
 
 // LRU memo for prepared 3D LUTs, bounded by a heap-byte budget.

@@ -15,10 +15,13 @@ void Lut3DCache::touch_locked(std::map<std::string, Entry>::iterator it) {
 }
 
 void Lut3DCache::evict_to_fit_locked(size_t incoming_bytes) {
-    // Drop least-recently-used entries until the incoming one fits. The `size()
-    // > 1` guard leaves an over-budget entry cached as the sole resident rather
-    // than refusing to cache it at all (a caller using an unusually large
-    // lut_resolution still gets single-slot memoization).
+    // Drop least-recently-used entries while the cache holds anything and the
+    // incoming entry would still overflow the budget. When incoming_bytes alone
+    // exceeds the budget, the loop simply empties the cache and stops (the
+    // `!entries_.empty()` bound), and the caller inserts the oversize entry
+    // unconditionally afterwards — so it is cached as the sole resident rather
+    // than refused (a caller using an unusually large lut_resolution still gets
+    // single-slot memoization). The next insert then evicts it here.
     while (!entries_.empty() && bytes_ + incoming_bytes > budget_) {
         const std::string& oldest = lru_.back();
         auto it = entries_.find(oldest);

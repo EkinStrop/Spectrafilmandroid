@@ -145,3 +145,20 @@ keystore secrets on a `v*` tag push and creates the GitHub Release.
   so `Presets` JSON round-trips on the plain JVM.
 - `HANDOFF.md` carries the latest session state; `docs/AUDIT.md` tracks open/incomplete items with
   severity. Stage-by-stage parity numbers and the porting map are in `docs/`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`thetechgeekko/Spektrafilm-android`); remote Claude
+sessions use the GitHub MCP tools, local sessions use `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`,
+`ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root (created lazily by
+`/domain-modeling`; absence is normal). See `docs/agents/domain.md`.

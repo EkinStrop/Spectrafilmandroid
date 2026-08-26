@@ -8,9 +8,10 @@
  * Because each output pixel is an independent function of its input pixel, the
  * result MUST be byte-identical regardless of the worker count. This test runs
  * the SAME input through spk_simulate at SPK_NUM_THREADS=1 and =8 and asserts the
- * outputs are bitwise equal (memcmp) — for the scan route, the print route, AND
- * with grain + halation ON (the stochastic/spatial branch, which stays serial and
- * must therefore also be unaffected by the worker count).
+ * outputs are bitwise equal (memcmp) — for the scan route, the print route, with
+ * grain + halation ON (the stochastic/spatial branch), and on a synthesized
+ * multi-block image large enough that the grain stage's fixed-block dynamic
+ * scheduler really runs blocks on concurrent workers.
  *
  * Build (host) — full source set, run from the cpp root:
  *   g++ -std=c++17 -O2 -pthread -I <cpp_root> -I <tools/parity> \
@@ -191,6 +192,45 @@ int main(int argc, char** argv) {
         ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
         ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
         ok &= check_identical("print+grain+halation", r1, r8);
+    }
+
+    // 5) MULTI-BLOCK grain. The 64x64 fixture is 4096 px < kGrainBlockPixels
+    //    (8192, model/grain.cpp), so scenarios 3-4 run the whole grain field as
+    //    ONE block on a lone worker — they prove single-block reproducibility,
+    //    not that the grain stage's dynamic block scheduler is thread-invariant.
+    //    Synthesize a 192x160 image: 30,720 px, strictly > 2*8192, giving FOUR
+    //    fixed 8192-px blocks, so at SPK_NUM_THREADS=8 several workers really do
+    //    pull blocks concurrently from the atomic counter (worker count clamps
+    //    to nblocks=4). Each block must produce the same bytes whichever worker
+    //    runs it and in whatever order — assert 1 vs 8 workers memcmp-identical
+    //    (max_abs==0). Input is deterministic: the 64x64 fixture tiled with
+    //    wraparound, scaled by a horizontal ramp so blocks see different density
+    //    statistics (uneven per-block cost is exactly what the dynamic scheduler
+    //    exists for). Grain only — halation adds serial blurs already covered
+    //    above and would only slow the gate down.
+    {
+        const int w2 = 192, h2 = 160;
+        const int npix2 = w2 * h2;  // 30,720 px -> 4 grain blocks of <=8192
+        std::vector<float> rgb2(static_cast<size_t>(npix2) * 3);
+        for (int y = 0; y < h2; ++y) {
+            for (int x = 0; x < w2; ++x) {
+                const size_t src =
+                    (static_cast<size_t>(y % height) * width + (x % width)) * 3;
+                const double scale =
+                    0.25 + 0.75 * (static_cast<double>(x) / (w2 - 1));
+                for (int c = 0; c < 3; ++c) {
+                    rgb2[(static_cast<size_t>(y) * w2 + x) * 3 + c] =
+                        static_cast<float>(rgb64[src + c] * scale);
+                }
+            }
+        }
+        spk_image in2{rgb2.data(), w2, h2, /*color_space=*/SPK_CS_PROPHOTO};
+        spk_params p = base;
+        p.scan_film = 1;
+        p.grain_active = 1;
+        ok &= simulate_with_threads(asset_dir, &in2, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in2, &p, 8, &r8);
+        ok &= check_identical("scan_film+grain multi-block 192x160", r1, r8);
     }
 
     std::printf("%s\n", ok ? "ALL PASS" : "FAIL");

@@ -246,6 +246,7 @@ jobs:
           # so every other golden stays byte-identical; this gates only the opt-in path.
           build_run test_gamut_in_xy tests/gamut_in_cases.bin
           build_run test_lut_accel "$G"
+          build_run test_lut_cache_e2e "$ASSET" tests/scan_portra_input_rgb.f64
           build_run test_scanner_lut_e2e "$ASSET" "$G/scan_portra" tests/scan_portra_input_rgb.f64
           build_run test_enlarger_lut_e2e "$ASSET" "$G/print_portra" tests/scan_portra_input_rgb.f64
           # Output color spaces: scan_portra final_rgb for all six output spaces

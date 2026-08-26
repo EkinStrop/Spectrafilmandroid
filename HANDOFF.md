@@ -1,6 +1,38 @@
 # Spektrafilm Android — Session Handoff
 
-## Current state (2026-07-02, branch `claude/exciting-hamilton-hya62`)
+## Current state (2026-08-26, fork-engine adoption worktree — #125)
+
+- **Fork engine adoption LANDED (local commit series; see issues #117/#118/#125).** The
+  VirtuaTOA/spektrafilm-android engine overlay — verified green in #118 (36/36 gates +
+  statistical grain checks + 12 MP 1-vs-8-worker memcmp) — is adopted per the #125 resolution:
+  grain-stage parallelization (fixed 8192-px blocks, per-block SplitMix64 seeding, dynamic
+  atomic-counter scheduling), the spectral 3D-LUT memo + shared interpolator
+  (`kernels/lut3d_cache.{h,cpp}`), the debug `-O2` CMake guard, the AE-off `spk_bake_cube_lut`
+  + sRGB-shaped lattice, the `spk_meter_exposure_ev` / `meterExposureEv` / `exposureGain`
+  metering API, and `tools/parity/run_engine_parity.sh` (full-suite local replay with a
+  ci.yml drift guard). Our `kernels/parallel.{h,cpp}` + `tests/test_parallel.cpp` were kept at
+  our HEAD (the `959e786` non-vacuous thread-invariance gate; the fork never touched them).
+- **Hardening on top of the overlay:** LUT-memo key segments are now length-prefixed (4-byte LE
+  byte-count header; two distinct input sequences can no longer concatenate to one byte
+  string), and the stale eviction comment was fixed. New gates: `test_parallel` scenario 5
+  (192×160 = 30,720 px → 4 grain blocks, 1-vs-8 workers memcmp-identical — the 64×64 fixture
+  runs grain in a single block and could not exercise the scheduler) and `test_bake_lut`'s
+  shaper property case (corner byte-equality, shaped≠linear, shaped entries vs a 65³ linear
+  reference within a measured 6e-2 interpolation-error bound).
+- **Host parity suite = 36 gates** (was 35): `test_lut_cache_e2e` added to ci.yml's
+  engine-parity job — the single-line workflow edit the owner authorized on #125.
+  `run_engine_parity.sh` drift guard counts 36 == 36. Full local run: `ALL OK`, zero FAIL.
+- **GRAIN REPRODUCIBILITY NOTE (accepted behavior change):** the grain field differs from
+  releases built before the adoption — per-block seeding replaced the old whole-image serial
+  RNG stream. It stays deterministic (same input+params+seed ⇒ same bytes), thread-invariant,
+  and inside the oracle's statistical band; grain was never oracle-bit-exact (stochastic stage).
+  Parity goldens are grain-off and unaffected.
+- **App wiring:** GPU preview bakes with `SpektraEngine.SHAPER_SRGB` and the GLES shader
+  decodes through the exact inverse + multiplies the metered AE gain (`uExposureGain`);
+  `.cube`/CLF export bakes stay `SHAPER_NONE`. Android SDK absent in the work container, so
+  `:app:testDebugUnitTest`/`:app:lint` were NOT run there — run them before merging.
+
+## Previous state (2026-07-02, branch `claude/exciting-hamilton-hya62`)
 
 - **"Exact + fast" pass MERGED (PR #109 + #110).** The PM directive (*"spektrafilm-exact result at
   ultra-fast speed"*) is fully landed: F1–F7 Kotlin robustness fixes, **E1** per-effect spatial
@@ -23,7 +55,8 @@
   `Oklab→XYZ`); reconstruction still preserves `L`. Bit-exact to the oracle (gate `max_abs 1.055e-14`
   / probes `1.221e-15`), gated by **`test_gamut_out_oklrab`** (golden at oracle `27bd085`). Commits
   `9cb0a0b` golden / `94d2274` engine+ci / `e1b75d8` app on `claude/exciting-hamilton-hya62`.
-- **Host parity suite = 35 gates**, all green (argv authoritative in `.github/workflows/ci.yml`);
+- **Host parity suite was 35 gates then** (now 36 — see Current state above), all green (argv
+  authoritative in `.github/workflows/ci.yml`);
   `SPK_NUM_THREADS` 1≡8 byte-identical (oklrab compress is serial+stateless); NDK r27 3-ABI build
   path unchanged. App **0.8.0 / versionCode 10**.
 - **This branch now carries the unmerged oklrab commits (slice 2) on top of `origin/main` + the
@@ -45,7 +78,9 @@ the `"jzazbz"` branch of `_get_output_c_max_table` in `utils/gamut_compression.p
 - **C++:** port JzAzBz forward/inverse into `model/gamut_compression.cpp` (capture the colour-science
   matrices/constants as bit-exact hex, as oklch did for OkLab); enum slot `kJzazbz=5` is reserved.
 - **Gate:** `test_gamut_out_jzazbz` + its `ci.yml` `build_run … tests/gamut_jzazbz_cases.bin` line
-  (bumps the suite to 36). Add `gamut_out_jzazbz` to the enumerated lists in CLAUDE.md + the skills.
+  (bumps the suite to 37 — `lut_cache_e2e` already made it 36; also sync
+  `tools/parity/run_engine_parity.sh`'s table or its drift guard fails). Add `gamut_out_jzazbz`
+  to the enumerated lists in CLAUDE.md + the skills.
 - **Facade/UI:** add `JZAZBZ` to `enum class OutputGamutCompress` (+ the exhaustive `when` in
   MainActivity — Kotlin will error if you forget) and the Output-gamut dropdown.
 - Then **`cam16ucs`** (`kCam16ucs=6`, the heaviest — full CIECAM16 forward/inverse). Default upstream.
@@ -129,6 +164,18 @@ Per increment: default path byte-identical, opt-in/default-OFF, feature-on withi
 
 ## Session history (compressed; full prose in this file's git history)
 
+- **2026-08-26 — fork engine adoption (#117/#118/#125).** Adopted the verified
+  VirtuaTOA fork overlay: grain parallelization (fixed 8192-px blocks + SplitMix64 per-block
+  seeds, dynamic scheduling; #118-verified 12 MP 114.8→35.2 s / 3.1 MP 45.1→11.7 s at 1→8
+  workers on a 4-core container, 12 MP memcmp-identical), spectral 3D-LUT memo
+  (`kernels/lut3d_cache`), debug `-O2` guard, AE-off + sRGB-shaped `spk_bake_cube_lut`,
+  `spk_meter_exposure_ev` API, `run_engine_parity.sh`. Kept OUR `kernels/parallel` +
+  `test_parallel` (959e786 gate). Hardened memo keys (length-prefixed segments). New gates:
+  multi-block grain scenario in `test_parallel`, shaper property case in `test_bake_lut`;
+  `test_lut_cache_e2e` added to ci.yml (owner-authorized single line) — suite 35→36, ALL OK.
+  App: GPU preview bakes SHAPER_SRGB + shader-side sRGB encode + metered `uExposureGain`;
+  exports stay SHAPER_NONE. Accepted change: grain field differs vs pre-adoption releases
+  (deterministic + thread-invariant still).
 - **2026-07-02 — P2 #6 slice 2: `oklrab` output-gamut compression (new draft PR, unmerged).** Cloned
   the merged `oklch` pattern: `compress_rgb_oklrab_chroma` = the oklch chroma reduction with the
   `C_max` lookup indexed by Ottosson 2023's rebased lightness `Lr = f(L)` (constants k1=0.206,

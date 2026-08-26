@@ -49,6 +49,7 @@
 #endif
 
 #include "io/npy_lut.h"
+#include "kernels/lut3d_cache.h"  // spk_engine holds the spectral 3D-LUT memo by value
 #include "model/color_filters.h"
 #include "profiles/profile.h"
 #include "runtime/color_reference.h"
@@ -211,6 +212,22 @@ struct spk_engine {
     std::mutex film_cache_mutex;
     FilmMemoSlot film_memo[2];
 
+    // SPECTRAL 3D-LUT memo (PERF), shared by the opt-in scanner LUT (scan()) and
+    // the opt-in enlarger LUT (print_expose()). Both are pure functions of the
+    // profile spectra, the enlarger/scan constants, the domain bounds and the step
+    // count, but were rebuilt from scratch on EVERY call — and
+    // spk_simulate_preview forces BOTH on, so every interactive frame paid two
+    // steps^3 sweeps of 81-band spectral integrals (plus their O(steps^3) PCHIP
+    // prepare) to reproduce a LUT that had not changed. Unlike the buffer memos
+    // above this one is keyed by RAW KEY BYTES compared exactly, not by a hash:
+    // each stage assembles a key from every value its sample function and grid
+    // construction consume (see the fold lists at the two call sites), so a hit
+    // returns a LUT byte-identical to rebuilding and no param change can silently
+    // reuse a stale one. Bounded LRU — several keyed inputs (the filtered
+    // illuminant, the midgray factor, grain.density_min) are live user params, so
+    // an unbounded map would grow with slider travel. Thread-safe on its own.
+    spk::Lut3DCache lut_cache;
+
     // PRINT-DENSITY (print_expose + print_develop) memo, keyed by the
     // film_density_cmy buffer CONTENT + every printing-stage input
     // (compute_print_density_key). Content-hashing makes it correct
@@ -258,6 +275,15 @@ uint64_t spk_test_print_density_cache_misses(spk_engine* eng) {
     if (!eng) return 0;
     std::lock_guard<std::mutex> g(eng->film_cache_mutex);
     return eng->print_density_memo.misses;
+}
+// Spectral 3D-LUT memo counters (scanner + enlarger share the cache; the kind tag
+// in each key keeps the two apart). tests/test_lut_cache_e2e.cpp reads these to
+// assert the memo engages AND that a hit renders byte-identically to a rebuild.
+uint64_t spk_test_lut_cache_hits(spk_engine* eng) {
+    return eng ? eng->lut_cache.hits() : 0;
+}
+uint64_t spk_test_lut_cache_misses(spk_engine* eng) {
+    return eng ? eng->lut_cache.misses() : 0;
 }
 #endif
 
@@ -1050,6 +1076,7 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     if (p->use_scanner_lut != 0) {
         sparams.use_lut = true;
         sparams.lut_resolution = p->lut_resolution;
+        sparams.lut_cache = &eng->lut_cache;  // memo the build (PERF, byte-identical)
     }
     sparams.tone_curve = build_tone_curve_set(p);
     // Scanner BLACK/WHITE XYZ correction (scan_film route): apply the shared affine
@@ -1219,6 +1246,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     if (p->use_enlarger_lut != 0) {
         pparams.use_enlarger_lut = true;
         pparams.lut_resolution = p->lut_resolution;
+        pparams.lut_cache = &eng->lut_cache;  // memo the build (PERF, byte-identical)
         pparams.grain_density_min[0] = static_cast<double>(p->grain_density_min[0]);
         pparams.grain_density_min[1] = static_cast<double>(p->grain_density_min[1]);
         pparams.grain_density_min[2] = static_cast<double>(p->grain_density_min[2]);
@@ -1473,6 +1501,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     if (p->use_scanner_lut != 0) {
         sparams.use_lut = true;
         sparams.lut_resolution = p->lut_resolution;
+        sparams.lut_cache = &eng->lut_cache;  // memo the build (PERF, byte-identical)
     }
     sparams.tone_curve = build_tone_curve_set(p);
     // Scanner BLACK/WHITE XYZ correction (print route): apply the shared affine
@@ -1901,7 +1930,52 @@ spk_status spk_simulate_tap(spk_engine* eng, const spk_image* in,
     return SPK_ERR_BAD_ARGS;  // unknown tap
 }
 
+spk_status spk_meter_exposure_ev(spk_engine* eng, const spk_image* in,
+                                 const spk_params* p, double* out_ev) {
+    if (!eng || !in || !p || !out_ev || !in->data) return SPK_ERR_BAD_ARGS;
+    if (in->width <= 0 || in->height <= 0) return SPK_ERR_BAD_ARGS;
+
+    // AE off => the render applies no gain, so the caller's gain is unity (0 EV).
+    *out_ev = 0.0;
+    if (p->auto_exposure == 0) return SPK_OK;
+
+    const int w = in->width, h = in->height;
+    std::vector<double> src(static_cast<size_t>(w) * h * 3);
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = static_cast<double>(in->data[i]);
+
+    // Method resolution is character-for-character the same as preprocess_geometry's
+    // (NULL => the schema default center_weighted; an unrecognised string is passed
+    // through as known=false so the metering collapses to 0 EV, matching the render).
+    spk::AeMethod method = spk::AeMethod::kCenterWeighted;
+    const bool known = p->auto_exposure_method == nullptr
+                           ? true
+                           : spk::ae_method_from_string(p->auto_exposure_method,
+                                                        &method);
+
+    // Reuse apply_auto_exposure VERBATIM on a scratch copy (whose scaled pixels we
+    // then discard) rather than re-deriving the metering here. It already returns
+    // the EV it applied, so this value cannot drift from what the render actually
+    // uses — which is the entire point of exposing it. The wasted scaling pass is
+    // O(npix) on a copy the caller never sees, negligible against the metering's
+    // own small_preview + luminance integral.
+    *out_ev = spk::apply_auto_exposure(src.data(), w, h,
+                                       spk::AeColorSpace::kProPhotoRGB,
+                                       /*apply_cctf_decoding=*/p->input_cctf_decoding != 0,
+                                       method, known);
+    return SPK_OK;
+}
+
+// sRGB EOTF: shaped lattice coordinate -> the linear value that coordinate stands for.
+// The GPU side applies the inverse (linear -> encoded) before its lookup, so the two
+// must stay exact inverses of each other.
+static inline float shaper_to_linear(float e) {
+    if (e <= 0.04045f) return e / 12.92f;
+    return static_cast<float>(std::pow((e + 0.055f) / 1.055f, 2.4));
+}
+
 spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
+                             int32_t shaper,
                              char* out_text, size_t out_cap, size_t* needed) {
     if (needed) *needed = 0;
     if (!eng || !p) return SPK_ERR_BAD_ARGS;
@@ -1939,6 +2013,23 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     // not touch it (a crop/rescale would corrupt the lattice -> wrong LUT).
     bp.crop = 0;
     bp.upscale_factor = 1.0f;
+    // AUTO-EXPOSURE OFF — same reasoning as crop, and a correctness fix, not a
+    // preference. auto_exposure defaults ON, and preprocess_geometry meters the
+    // input to derive ONE global gain. Applied to the lattice it meters a
+    // synthetic n^3 x 1 ramp of every RGB combination — not a photograph — and
+    // bakes that meaningless gain into the LUT, which is then applied to real
+    // images whose correct gain is unrelated. Because the film density curves are
+    // non-linear, the resulting error is not a brightness offset: the scene lands
+    // in the wrong region of the curve (the toe, where base fog lifts shadows and
+    // contrast collapses), which is the underexposed/raised-blacks look reported
+    // against the GPU LUT preview.
+    //
+    // A pointwise LUT fundamentally CANNOT carry auto-exposure: AE is a function
+    // of the whole image, and the lattice is not an image. So the contract is that
+    // the CALLER applies the exposure gain to its pixels BEFORE the LUT lookup;
+    // this bake emits the pure pointwise transform at unity gain. See the
+    // spk_bake_cube_lut docs in spektra.h and docs/CAMERA_PLAN.md.
+    bp.auto_exposure = 0;
 
     // --- Build the identity lattice as an spk_image --------------------------
     // Lattice axes span [0,1] in the engine's linear working space (treated as
@@ -1950,13 +2041,20 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     const size_t count = static_cast<size_t>(n) * n * n;
     std::vector<float> lattice(count * 3);
     const float denom = static_cast<float>(n - 1);
+    // With a shaper the lattice is spaced evenly in the SHAPED domain, so the entries
+    // are the linear values those shaped coordinates represent. That is what moves the
+    // sampling resolution down into the shadows where the film curve actually bends.
+    const bool shaped = shaper != 0;
     size_t idx = 0;
     for (int r = 0; r < n; ++r) {
-        const float rv = static_cast<float>(r) / denom;
+        float rv = static_cast<float>(r) / denom;
+        if (shaped) rv = shaper_to_linear(rv);
         for (int g = 0; g < n; ++g) {
-            const float gv = static_cast<float>(g) / denom;
+            float gv = static_cast<float>(g) / denom;
+            if (shaped) gv = shaper_to_linear(gv);
             for (int b = 0; b < n; ++b) {
-                const float bv = static_cast<float>(b) / denom;
+                float bv = static_cast<float>(b) / denom;
+                if (shaped) bv = shaper_to_linear(bv);
                 lattice[idx * 3 + 0] = rv;
                 lattice[idx * 3 + 1] = gv;
                 lattice[idx * 3 + 2] = bv;

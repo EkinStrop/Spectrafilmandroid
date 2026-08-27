@@ -17,6 +17,8 @@
 
 #include <cmath>
 
+#include "kernels/parallel.h"
+
 namespace spk {
 
 namespace {
@@ -252,17 +254,22 @@ void pchip_interp_at(const PchipPrep& p, double r, double g, double b,
 void apply_prepared_normalized(const PchipPrep& prep, const double* norm, int w,
                                int h, double* out) {
     const double scale = static_cast<double>(prep.size - 1);
-    const size_t n = static_cast<size_t>(w) * h;
-    for (size_t p = 0; p < n; ++p) {
-        double r = norm[p * 3 + 0] * scale;
-        double g = norm[p * 3 + 1] * scale;
-        double b = norm[p * 3 + 2] * scale;
-        double v[3];
-        pchip_interp_at(prep, r, g, b, v);
-        out[p * 3 + 0] = v[0];
-        out[p * 3 + 1] = v[1];
-        out[p * 3 + 2] = v[2];
-    }
+    const int n = w * h;
+    // Pure per-pixel map with disjoint writes -> deterministic parallel chunks
+    // (byte-identical for any worker count).
+    parallel_for(0, n, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p) {
+            const size_t base = static_cast<size_t>(p) * 3;
+            double r = norm[base + 0] * scale;
+            double g = norm[base + 1] * scale;
+            double b = norm[base + 2] * scale;
+            double v[3];
+            pchip_interp_at(prep, r, g, b, v);
+            out[base + 0] = v[0];
+            out[base + 1] = v[1];
+            out[base + 2] = v[2];
+        }
+    });
 }
 
 // The steps<=1 degenerate cases, shared by both entry points. Returns true when
@@ -288,13 +295,18 @@ bool apply_degenerate(const Lut3D& L, int w, int h, double* out) {
 // compute_with_lut's normalization: (data - xmin)/(xmax - xmin).
 void normalize_for_lut(const Lut3D& L, const double* data, int w, int h,
                        std::vector<double>* norm) {
-    const size_t n = static_cast<size_t>(w) * h;
-    norm->resize(n * 3);
-    for (size_t p = 0; p < n; ++p)
-        for (int c = 0; c < 3; ++c) {
-            double denom = L.xmax[c] - L.xmin[c];
-            (*norm)[p * 3 + c] = (data[p * 3 + c] - L.xmin[c]) / denom;
-        }
+    const int n = w * h;
+    norm->resize(static_cast<size_t>(n) * 3);
+    double* dst = norm->data();
+    // Per-pixel map, disjoint writes -> deterministic parallel chunks.
+    parallel_for(0, n, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p)
+            for (int c = 0; c < 3; ++c) {
+                double denom = L.xmax[c] - L.xmin[c];
+                dst[static_cast<size_t>(p) * 3 + c] =
+                    (data[static_cast<size_t>(p) * 3 + c] - L.xmin[c]) / denom;
+            }
+    });
 }
 
 }  // namespace

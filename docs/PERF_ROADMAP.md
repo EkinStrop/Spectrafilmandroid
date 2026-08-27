@@ -64,6 +64,23 @@ GPU pipeline. CPU micro-opt alone won't close that; the gap is **architectural (
   ~840 → ~140 MB — a 12 MP export now fits comfortably on a 4 GB device. Byte-identical
   (no arithmetic change; scenario-G direct-vs-materialized gates), and slightly faster
   (cold scan 196.9 → 179.8 ms at 512²/4T from the killed memsets + fused loops).
+- **S7 — parallelize the serial per-pixel maps** (#122): the 3D-LUT PCHIP apply (+ its
+  normalization), the Gaussian/exponential filters (FIR + IIR-horizontal over rows,
+  IIR-vertical over columns with chunk-local state, de/re-interleave + axpy passes), and
+  the optical-diffusion direct convolution / halation mix loops all run through the
+  deterministic fork-join (`parallel_for` + new work-weighted `parallel_for_weighted`).
+  Byte-identical for any worker count by construction; `test_parallel` grew dedicated
+  LUT-accel and diffusion-filter 1-vs-8 scenarios. Host 4-core, 3.1 MP, 1→4 workers:
+  LUT apply 255.5→103.2 ms (2.5×), Gaussian f64 IIR 155.3→52.2 ms (3.0×), f64 FIR
+  205.5→74.5 ms (2.8×), f32 IIR 123.5→39.4 ms (3.1×), f32 FIR 129.3→37.3 ms (3.5×),
+  exponential filter 656.4→251.6 ms (2.6×), halation 1801.7→871.4 ms (2.1×), diffusion
+  convolution 8704.4→2226.9 ms (3.9×). This serves every caller: halation, camera/scanner
+  lens blur, unsharp, DIR-coupler diffusion, grain field blurs, glare, both spectral LUT
+  routes (which preview force-enables every frame). Route-level at 640×480 / 4 workers
+  (old vs new binary, output checksums identical): print+both-LUTs 213.6→174.6 ms (−18%),
+  scan+halation 389.1→316.8 ms (−19%), scan+halation+diffusion-filter-0.8 49.2 s→13.4 s
+  (3.66× — the direct O(w·h·ks²) convolution dominates there; replacing the algorithm is
+  a separate, parity-affecting decision).
 
 Measured 2026-07-02 (512×512 medians, `SPK_NUM_THREADS=8` on the 4-core container): warm print
 edits 153–162 ms vs 402 ms cold; warm scan 144–159 ms vs 243 ms cold. Note the older 1200×900
@@ -125,11 +142,12 @@ host: scan_film **13.6 → 12.1 ms**, print **26.0 → 22.9 ms** (both LUTs fetc
 the fitted fixed intercept dropping **1.9 → 0.29 ms**. Gated by `test_lut_cache_e2e` (warm
 engine must equal a fresh engine byte-for-byte).
 
-What is **left** on this path, and is now the larger term: `apply_lut_3d_pchip` interpolates
-the image on **one thread** — ≈ 4.4 ms per LUT for 147k px on the fork host, versus 0.4 ms for
-the parallelized direct per-pixel loop it replaces. It is a pure per-pixel map with disjoint
-outputs, so `kernels/parallel`'s deterministic chunking would apply unchanged (thread-invariant
-by construction). That is the next cheap win here, worth roughly 2× the memo.
+What was **left** on this path — `apply_lut_3d_pchip` interpolating the image on **one
+thread** (≈ 4.4 ms per LUT for 147k px on the fork host, versus 0.4 ms for the parallelized
+direct per-pixel loop it replaces) — ✅ **SHIPPED in S7 (#122)**: the apply (and its input
+normalization) now runs through `kernels/parallel`'s deterministic chunking, thread-invariant
+by construction (gated by a dedicated `test_parallel` LUT scenario). See S7 above for the
+measured numbers.
 
 ### This repo's #118 verification numbers (grain parallelization)
 

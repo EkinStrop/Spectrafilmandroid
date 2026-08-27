@@ -1,8 +1,40 @@
 # Spektrafilm Android — Session Handoff
 
-## Current state (2026-08-27, export fast path part 2 — #121)
+## Current state (2026-08-27, parallelize the serial per-pixel maps — #122)
 
-- **#121 LANDED (this session): EXPORT_FASTPATH item 4 — the float64 full-res
+- **#122 LANDED (this session): the last serial per-pixel/per-line hot loops now run
+  through the deterministic fork-join.** No algorithmic change anywhere — the same
+  arithmetic per pixel/row/column, chunk boundaries a pure function of (count, threads),
+  byte-identical output for any worker count. 36/36 gates green.
+  - **3D-LUT PCHIP apply + normalization** (`kernels/lut3d.cpp`) chunk over pixels —
+    preview force-enables both spectral LUTs, so this was serial work on every frame.
+  - **Gaussian/exponential filters** (f32 `kernels/gaussian.cpp`, f64
+    `kernels/exponential_filter.cpp`): FIR + IIR-horizontal over rows; IIR-vertical over
+    columns with chunk-local recurrence state; de/re-interleave + init/copy/axpy over
+    elements. Serves halation, lens blur, scanner blur/unsharp, DIR diffusion, grain
+    blurs, glare.
+  - **Diffusion filter + halation maps** (`model/diffusion.cpp`): the O(w·h·ks²) direct
+    convolution + reflect-pad build over rows; scatter/halation mixes over elements.
+  - New `parallel_for_weighted(begin, end, unit_work, body)` in `kernels/parallel.h` —
+    deterministic chunking with the min-chunk clamp measured in pixel-equivalents, so
+    row/column ranges don't collapse to one chunk (`parallel_for` itself unchanged;
+    dispatch factored into `detail::parallel_dispatch`).
+  - `test_parallel` grew scenarios 6 (print + both spectral LUTs) and 7 (camera
+    diffusion filter): all 7 scenarios memcmp-identical 1-vs-8 workers under
+    `SPK_PARALLEL_MIN_CHUNK=256`.
+  - Measured (host 4-core, 3.1 MP, 1→4 workers): LUT apply 2.5×, Gaussian f64 3.0×/2.8×
+    (IIR/FIR), f32 3.1×/3.5×, exponential 2.6×, halation 2.1×, diffusion conv 3.9× —
+    checksums identical at 1/4/8. Route-level (640×480, 4 workers, old-vs-new binary
+    with identical output checksums): print+LUTs −18%, scan+halation −19%,
+    scan+halation+diffusion-0.8 **49.2 s → 13.4 s (3.66×)** — the direct convolution
+    dominates that config; a separable/FFT replacement would touch parity numerics and
+    is a separate decision (fog item).
+- Perf line now waits on **#119** (on-device baseline, HITL — needs the owner + adb),
+  which unblocks #126 numeric targets and the #127 GPU-preview decision.
+
+## Prior state (2026-08-27, export fast path part 2 — #121)
+
+- **#121 LANDED: EXPORT_FASTPATH item 4 — the float64 full-res
   intermediates are retired.** Allocation/lifetime work only; zero arithmetic change;
   36/36 gates green; `test_simulate_e2e` scenario G extended to gate the direct path
   (AE-on + spatial-on) byte-identical to the materialized path.

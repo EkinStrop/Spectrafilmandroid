@@ -613,6 +613,14 @@ JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
     // interprets it as such (FilmingParams::input_color_space == kProPhotoRGB).
     spk_image in_img{in_data, w, h, static_cast<int>(SPK_CS_PROPHOTO)};
     spk_image out{};
+    // One-shot memo opt-out (EXPORT_FASTPATH item 2): the app's non-preview
+    // renders are exports and magnifier crops — their memo key can never be
+    // re-used, so the full-buffer key hashing + result copies (hundreds of ms
+    // + ~2x full-res buffers held in the engine at 12 MP) are pure overhead.
+    // The memos are transparent (byte-identical hit or miss), so this cannot
+    // change output pixels. Preview renders keep the memos — that is what
+    // they exist for.
+    if (!preview) params.disable_buffer_memos = 1;
     spk_status st = preview ? spk_simulate_preview(eng, &in_img, &params, &out)
                             : spk_simulate(eng, &in_img, &params, &out);
     if (st != SPK_OK) { throw_status(env, st); return nullptr; }

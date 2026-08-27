@@ -32,7 +32,7 @@ to protect them.
 splits for real. **[measured]** after the fix: 8 threads → **8 chunks**, results still correct.
 Unset in production, so the shipping path and every golden are byte-identical to before.
 
-> **Run the 35-test `engine-parity` suite before merging.** The toolchain and assets to run it
+> **Run the 36-test `engine-parity` suite before merging.** The toolchain and assets to run it
 > were not available where this change was written; the default-inert argument is sound but the
 > suite is the authority.
 
@@ -48,8 +48,8 @@ is real, no chunking change can be trusted — including the ones recommended be
 
 | # | Change | Expected win | Bit-exact? |
 |---|---|---|---|
-| 1 | **O(1) uniform-axis density lookup** replacing the per-pixel binary search | **[measured]** 7.14× on that kernel; ~−9% scan / −12% print route | **Yes** — 0 / 4.5 M float32 results differ (same bracket by construction) |
-| 2 | **Stop hashing on export.** The memo key FNV-1a's the whole float64 buffer byte-at-a-time, twice on a miss, for a one-shot export that can never hit the cache | **[measured]** 0.74 GB/s over 576 MB ≈ hundreds of ms | **Yes** — pure deletion, no arithmetic |
+| 1 | ✅ **LANDED (#120)** — **O(1) uniform-axis density lookup** replacing the per-pixel binary search (`kernels/uniform_axis.h`: load-time uniformity check + estimate + fix-up walk to the exact searchsorted bracket; binary-search fallback for non-qualifying axes) | **[measured]** 7.14× on that kernel; ~−9% scan / −12% print route | **Yes** — 0 / 4.5 M float32 results differ (same bracket by construction) |
+| 2 | ✅ **LANDED (#120)** — **Stop hashing on export.** The memo key FNV-1a's the whole float64 buffer byte-at-a-time, twice on a miss, for a one-shot export that can never hit the cache. Landed as `spk_params.disable_buffer_memos` (set by the app JNI for non-preview renders) + single key computation per miss; gated by `test_simulate_e2e` scenario G | **[measured]** 0.74 GB/s over 576 MB ≈ hundreds of ms | **Yes** — pure deletion, no arithmetic |
 | 3 | **Heterogeneous-core chunk dispatch.** Keep chunk *boundaries* a pure function of (count, K) — determinism lives there — but hand chunks out via an atomic counter so big cores absorb more work | **[needs device]** 1.3–2× whole render on big.LITTLE | **Yes** — same boundaries, disjoint writes |
 | 4 | **Delete the full-res float64 intermediates and the zero-fill.** A 12 MP render allocates and zero-touches ~900 MB before doing useful work | peak ~1.2 GB → **~0.35 GB** | **Yes** — no arithmetic change |
 | 5 | **NEON 16-bit quantizer** replacing the per-sample Kotlin float→uint16 loop (~36 M samples with bounds-checked NIO ops at 12 MP) | large | **Yes** — reproduces the scalar rounding exactly |
@@ -78,16 +78,21 @@ still a large win with no arithmetic change at all.
 Recorded because acting on the uncorrected versions would introduce bugs:
 
 - **The O(1) lookup as first proposed dropped the clamp early-returns** present in both current
-  implementations (`x <= xp[0]` / `x >= xp[n-1]`). Must be preserved.
+  implementations (`x <= xp[0]` / `x >= xp[n-1]`). Must be preserved. *(Honoured in the landed
+  version: the clamps run before the bracket lookup, unchanged.)*
 - **The DIR-coupler axis is not uniform.** It is built per channel as `le[k] / gamma_factor[c]`,
   so the uniform-axis assumption is unsound there. Apply item 1 only where uniformity is checked
-  at load time, with a binary-search fallback.
+  at load time, with a binary-search fallback. *(Honoured: `detect_uniform_axis` requires
+  strictly-ascending + within step/4 of the uniform fit, and the fix-up walk makes the bracket
+  exact regardless — the tolerance only guarantees the walk is O(1).)*
 - **Glare was missing from the pass-fusion gate.** It runs between the two loops, so fusing them
   is only valid when glare is inactive too.
 - **Folding grain into the memo key without folding all grain parameters** is a sticky
   wrong-image bug — the bad entry persists.
 - **`fast_interp_channel` has no NaN guard** (unlike `np_interp_array`, which checks explicitly).
   A NaN input takes neither clamp branch and indexes with an undefined comparison result.
+  *(Fixed with item 1: NaN now returns NaN up front — the previous behavior was an
+  out-of-bounds `xa[-1]` read.)*
 - **The "≈20× encoder" headline compares PNG16 before to uncompressed TIFF after** — that is a
   default-format change, not a like-for-like speedup. Report the two separately.
 
@@ -122,7 +127,7 @@ what makes a 12 MP export survive on a 4 GB device at all (measured peak-RSS slo
 
 Every change must pass before it lands:
 
-1. The full 35-test `engine-parity` suite green.
+1. The full 36-test `engine-parity` suite green.
 2. `test_parallel` green **with real multi-chunk execution** (Phase 0).
 3. An **export-digest** check: SHA-256 of the exported container payload over a fixed matrix of
    scene × format × params, so "quality unchanged" is a property of the shipped file rather than

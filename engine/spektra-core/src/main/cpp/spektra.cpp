@@ -1005,16 +1005,23 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     std::vector<float> density_cmy(static_cast<size_t>(npix) * 3);
     const bool scan_tap_bypass =
         (tap_log_raw != nullptr) || (tap_density_cmy != nullptr);
-    const bool use_scan_film_cache = !scan_tap_bypass && !grain;
+    // Also skipped for one-shot renders (disable_buffer_memos, EXPORT_FASTPATH
+    // item 2): no key hash, no lookup, no store — the warm slot stays intact.
+    const bool use_scan_film_cache =
+        !scan_tap_bypass && !grain && p->disable_buffer_memos == 0;
 
     bool scan_film_cache_hit = false;
+    // Computed ONCE per render (EXPORT_FASTPATH item 2): the key hashes the
+    // whole float64 rgb buffer, so the old check-then-store recompute paid
+    // that full-buffer hash twice on every miss.
+    uint64_t scan_film_key = 0;
     if (use_scan_film_cache) {
-        const uint64_t key = compute_film_cache_key(
+        scan_film_key = compute_film_cache_key(
             rgb, width, height, in->color_space, p, resize_pixel_size_um,
             fparams.bw_exposure_correction);
         std::lock_guard<std::mutex> g(eng->film_cache_mutex);
         auto& slot = eng->film_memo[spk_engine::kMemoScan];
-        if (slot.valid && slot.key == key &&
+        if (slot.valid && slot.key == scan_film_key &&
             slot.entry.width == width && slot.entry.height == height &&
             slot.entry.film_density_cmy.size() == density_cmy.size()) {
             // HIT: copy the cached buffer out BY VALUE while holding the lock.
@@ -1033,15 +1040,12 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
         // 5) develop(): log_raw -> density_cmy (+ DIR couplers, spatial diffusion if on).
         spk::develop(log_raw.data(), width, height, film, fparams, density_cmy.data());
         if (use_scan_film_cache) {
-            const uint64_t key = compute_film_cache_key(
-                rgb, width, height, in->color_space, p, resize_pixel_size_um,
-                fparams.bw_exposure_correction);
             std::lock_guard<std::mutex> g(eng->film_cache_mutex);
             auto& slot = eng->film_memo[spk_engine::kMemoScan];
             slot.entry.width = width;
             slot.entry.height = height;
             slot.entry.film_density_cmy = density_cmy;
-            slot.key = key;
+            slot.key = scan_film_key;
             slot.valid = true;
             ++slot.misses;
         }
@@ -1364,20 +1368,28 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     // Cache is BYPASSED (always recompute) when:
     //   (a) a debug tap (log_raw / film_density_cmy) is requested — keeps the tap
     //       path byte-identical and avoids caching tap-only renders, OR
-    //   (b) grain is on (stochastic).
+    //   (b) grain is on (stochastic), OR
+    //   (c) the caller opted out for a one-shot render (disable_buffer_memos,
+    //       EXPORT_FASTPATH item 2): no key hash, no lookup, no store — and the
+    //       warm slot stays intact.
     std::vector<float> film_density_cmy(static_cast<size_t>(npix) * 3);
     const bool tap_bypass = (tap_log_raw != nullptr) || (tap_film_density_cmy != nullptr);
-    const bool use_film_cache = !tap_bypass && !print_stochastic;
+    const bool use_film_cache =
+        !tap_bypass && !print_stochastic && p->disable_buffer_memos == 0;
 
     bool film_cache_hit = false;
+    // Computed ONCE per render (EXPORT_FASTPATH item 2): the key hashes the
+    // whole float64 rgb buffer, so the old check-then-store recompute paid
+    // that full-buffer hash twice on every miss.
+    uint64_t film_key = 0;
     if (use_film_cache) {
-        const uint64_t key = compute_film_cache_key(rgb, width, height,
-                                                    in->color_space, p,
-                                                    resize_pixel_size_um,
-                                                    /*bw_exposure_correction=*/1.0);
+        film_key = compute_film_cache_key(rgb, width, height,
+                                          in->color_space, p,
+                                          resize_pixel_size_um,
+                                          /*bw_exposure_correction=*/1.0);
         std::lock_guard<std::mutex> g(eng->film_cache_mutex);
         auto& slot = eng->film_memo[spk_engine::kMemoPrint];
-        if (slot.valid && slot.key == key &&
+        if (slot.valid && slot.key == film_key &&
             slot.entry.width == width && slot.entry.height == height &&
             slot.entry.film_density_cmy.size() == film_density_cmy.size()) {
             // HIT: copy the cached buffer out BY VALUE while holding the lock.
@@ -1396,16 +1408,12 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
                      film_density_cmy.data());
         if (use_film_cache) {
             // Store {width, height, film_density_cmy} + key under the lock, count miss.
-            const uint64_t key = compute_film_cache_key(rgb, width, height,
-                                                        in->color_space, p,
-                                                        resize_pixel_size_um,
-                                                        /*bw_exposure_correction=*/1.0);
             std::lock_guard<std::mutex> g(eng->film_cache_mutex);
             auto& slot = eng->film_memo[spk_engine::kMemoPrint];
             slot.entry.width = width;
             slot.entry.height = height;
             slot.entry.film_density_cmy = film_density_cmy;
-            slot.key = key;
+            slot.key = film_key;
             slot.valid = true;
             ++slot.misses;
         }
@@ -1418,10 +1426,16 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     //    tone curve/glare) therefore reruns scan() alone. Debug-tap renders
     //    bypass, keeping the tap path byte-identical to a plain recompute.
     std::vector<float> print_density_cmy(static_cast<size_t>(npix) * 3);
-    const bool pd_tap_bypass = tap_bypass || (tap_print_density_cmy != nullptr);
+    // Bypassed for tap renders AND for one-shot renders (disable_buffer_memos,
+    // EXPORT_FASTPATH item 2 — the key hashes the whole float32 film buffer).
+    const bool pd_bypass = tap_bypass || (tap_print_density_cmy != nullptr) ||
+                           p->disable_buffer_memos != 0;
     bool pd_hit = false;
-    if (!pd_tap_bypass) {
-        const uint64_t pd_key = compute_print_density_key(
+    // Computed ONCE per render (item 2): was recomputed on the store leg of
+    // every miss, hashing the full film_density_cmy buffer twice.
+    uint64_t pd_key = 0;
+    if (!pd_bypass) {
+        pd_key = compute_print_density_key(
             film_density_cmy, width, height, p, resize_pixel_size_um);
         std::lock_guard<std::mutex> g(eng->film_cache_mutex);
         auto& slot = eng->print_density_memo;
@@ -1439,9 +1453,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
                           print_log_raw.data());
         spk::print_develop(prnt, pparams, print_log_raw.data(), npix,
                            print_density_cmy.data());
-        if (!pd_tap_bypass) {
-            const uint64_t pd_key = compute_print_density_key(
-                film_density_cmy, width, height, p, resize_pixel_size_um);
+        if (!pd_bypass) {
             std::lock_guard<std::mutex> g(eng->film_cache_mutex);
             auto& slot = eng->print_density_memo;
             slot.entry.width = width;
@@ -1727,6 +1739,10 @@ void spk_default_params(spk_params* p) {
     p->tone_curve_rgb_n[0] = 0;
     p->tone_curve_rgb_n[1] = 0;
     p->tone_curve_rgb_n[2] = 0;
+
+    // runtime render control: buffer memos active by default (previews and every
+    // existing caller unchanged); one-shot renders opt out (see spektra.h).
+    p->disable_buffer_memos = 0;
 }
 
 const char* spk_status_str(spk_status s) {

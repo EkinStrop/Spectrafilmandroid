@@ -662,6 +662,80 @@ int main(int argc, char** argv) {
                         ghit_ok ? "PASS" : "FAIL");
             pass_film_cache = pass_film_cache && big2 && ghit_ok;
         }
+
+        // Scenario G (ONE-SHOT MEMO OPT-OUT, EXPORT_FASTPATH item 2): a render
+        // with disable_buffer_memos=1 must (1) produce byte-identical pixels to
+        // the same params with the memos on (the memos are transparent, so the
+        // flag cannot touch output), (2) move NO memo counter on either route
+        // (no lookup, no store — the export path pays zero key hashing), and
+        // (3) leave the warm slots intact rather than evicting them.
+        {
+            // -- Print route: warm both print-route slots with a unique base. --
+            spk_params pb = make_p0();
+            pb.exposure_compensation_ev = 0.53f;  // unique: owns this warm-up
+            spk_image ref{};
+            bool ok_ref =
+                (spk_simulate(eng, &in_img, &pb, &ref) == SPK_OK && ref.data);
+
+            uint64_t h0 = spk_test_film_cache_hits(eng);
+            uint64_t m0 = spk_test_film_cache_misses(eng);
+            uint64_t sh0 = spk_test_scan_film_cache_hits(eng);
+            uint64_t sm0 = spk_test_scan_film_cache_misses(eng);
+            uint64_t ph0 = spk_test_print_density_cache_hits(eng);
+            uint64_t pm0 = spk_test_print_density_cache_misses(eng);
+
+            spk_params poff = pb;
+            poff.disable_buffer_memos = 1;
+            spk_image off{};
+            bool ok_off =
+                (spk_simulate(eng, &in_img, &poff, &off) == SPK_OK && off.data);
+            bool same = ok_ref && ok_off &&
+                        std::memcmp(ref.data, off.data, n * sizeof(float)) == 0;
+            bool frozen = h0 == spk_test_film_cache_hits(eng) &&
+                          m0 == spk_test_film_cache_misses(eng) &&
+                          sh0 == spk_test_scan_film_cache_hits(eng) &&
+                          sm0 == spk_test_scan_film_cache_misses(eng) &&
+                          ph0 == spk_test_print_density_cache_hits(eng) &&
+                          pm0 == spk_test_print_density_cache_misses(eng);
+            if (ref.data) spk_image_free(&ref);
+            if (off.data) spk_image_free(&off);
+
+            // The warm slots must have survived the opted-out render: repeating
+            // the memo-on params must HIT (film + print-density), not re-store.
+            uint64_t h1 = spk_test_film_cache_hits(eng);
+            uint64_t p1 = spk_test_print_density_cache_hits(eng);
+            spk_image rep{};
+            bool ok_rep =
+                (spk_simulate(eng, &in_img, &pb, &rep) == SPK_OK && rep.data);
+            if (rep.data) spk_image_free(&rep);
+            bool warm_kept = ok_rep && spk_test_film_cache_hits(eng) > h1 &&
+                             spk_test_print_density_cache_hits(eng) > p1;
+
+            // -- Scan route: the same counter-freeze property. --
+            spk_params ps = make_p0();
+            ps.scan_film = 1;
+            ps.exposure_compensation_ev = 0.53f;
+            ps.disable_buffer_memos = 1;
+            uint64_t sh1 = spk_test_scan_film_cache_hits(eng);
+            uint64_t sm1 = spk_test_scan_film_cache_misses(eng);
+            spk_image so{};
+            bool ok_scan =
+                (spk_simulate(eng, &in_img, &ps, &so) == SPK_OK && so.data);
+            if (so.data) spk_image_free(&so);
+            bool scan_frozen = ok_scan &&
+                               sh1 == spk_test_scan_film_cache_hits(eng) &&
+                               sm1 == spk_test_scan_film_cache_misses(eng);
+
+            bool g_ok = same && frozen && warm_kept && scan_frozen;
+            std::printf("[film_cache G: disable_buffer_memos opt-out] pixels %s, "
+                        "counters %s, warm slots %s, scan route %s -> %s\n",
+                        same ? "identical" : "DIFFER",
+                        frozen ? "frozen" : "MOVED",
+                        warm_kept ? "kept" : "LOST",
+                        scan_frozen ? "frozen" : "MOVED",
+                        g_ok ? "PASS" : "FAIL");
+            pass_film_cache = pass_film_cache && g_ok;
+        }
     }
 
     spk_engine_destroy(eng);

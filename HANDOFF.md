@@ -1,6 +1,31 @@
 # Spektrafilm Android — Session Handoff
 
-## Current state (2026-08-26, fork-engine adoption worktree — #125)
+## Current state (2026-08-27, export fast path part 1 — #120)
+
+- **Owner priority (standing): performance first.** No camera-feature work until the app is
+  "super fast" (#123 closed DEFERRED; map #117 carries the note). The perf line is: #119
+  device baseline (HITL) → #120/#121/#122 decision-free fastpath tickets → #126 targets →
+  #127 GPU-preview decision.
+- **#120 LANDED (this session): EXPORT_FASTPATH items 1+2, bit-exact.**
+  - O(1) uniform-axis density lookups (`kernels/uniform_axis.h`; wired into
+    `kernels/interp.cpp::interp1d_planar3` + `model/couplers.cpp::fast_interp_channel`).
+    Detection at load (strictly ascending + within step/4 of uniform), estimate + fix-up walk
+    to the EXACT searchsorted bracket, binary-search fallback otherwise. Host kernels
+    (4.19 M px, 1 thread): exposure→density 725.5 → 65.6 ms (11.1×), DIR couplers
+    637.3 → 70.3 ms (9.1×); cold scan −9.4% / cold print −6.0% (512², 4T). Outputs
+    byte-identical (checksummed over 12.6 M randomized lookups). NaN guard added to
+    `fast_interp_channel` (was an out-of-bounds `xa[-1]` read).
+  - One-shot memo opt-out: `spk_params.disable_buffer_memos` (default 0 = unchanged), set by
+    the JNI for every non-preview render (export + magnifier). Skips the full-buffer FNV key
+    hashing, the memo stores, and the slot eviction; preview memoization unchanged; miss-path
+    key now computed once (was twice). −275 ms per one-shot render at 3.1 MP (≈ −1.1 s at
+    12 MP). New gate: `test_simulate_e2e` scenario G.
+  - Suite: 36/36 green locally (`tools/parity/run_engine_parity.sh`); no new gate binary, no
+    workflow edit needed.
+- Remaining fastpath tickets: **#121** (retire float64 intermediates, peak 1.2 GB → 0.35 GB)
+  and **#122** (parallelize LUT apply + spatial filters) — both decision-free AFK tasks.
+
+## Prior state (2026-08-26, fork-engine adoption worktree — #125)
 
 - **Fork engine adoption LANDED (local commit series; see issues #117/#118/#125).** The
   VirtuaTOA/spektrafilm-android engine overlay — verified green in #118 (36/36 gates +

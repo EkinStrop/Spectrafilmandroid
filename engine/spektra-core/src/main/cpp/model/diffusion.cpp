@@ -522,13 +522,18 @@ void apply_highlight_boost(double* raw, int w, int h, const HalationParams& para
     const double inv_max_raw = 1.0 / max_raw;
     const double boost_scale = k * max_raw;
 
-    for (size_t i = 0; i < total; ++i) {
-        const double xv = raw[i];
-        if (xv > raw_x0) {
-            const double dx = (xv - raw_x0) * inv_max_raw;
-            raw[i] = xv + boost_scale * (std::exp(a * dx) - a * dx - 1.0);
+    // Per-element map, disjoint writes -> deterministic parallel chunks
+    // (byte-identical for any worker count; 1-vs-8 gated by
+    // test_highlight_boost_e2e).
+    parallel_for(0, static_cast<int>(total), [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) {
+            const double xv = raw[i];
+            if (xv > raw_x0) {
+                const double dx = (xv - raw_x0) * inv_max_raw;
+                raw[i] = xv + boost_scale * (std::exp(a * dx) - a * dx - 1.0);
+            }
         }
-    }
+    });
 }
 
 }  // namespace spk

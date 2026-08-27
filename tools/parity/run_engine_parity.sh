@@ -62,6 +62,8 @@ TESTS=(
   "test_highlight_boost_e2e|$ASSET|$G/scan_portra_boost|tests/scan_portra_input_rgb.f64|$G"
   "test_spatial_decouple_e2e|$ASSET|$G/scan_portra_lensblur_nohalation|tests/scan_portra_input_rgb.f64|$G"
   "test_print_spatial_e2e|$ASSET|$G/print_portra_spatial|tests/scan_portra_input_rgb.f64|$G"
+  "test_grain|$G/scan_portra/film_density_cmy.spkvec|tests/grain_ref_density.spkvec"
+  "test_grain_sublayer|$G/scan_portra/film_density_cmy.spkvec|tests/grain_sublayer_ref_density.spkvec|$ASSET/profiles/kodak_portra_400.json"
 )
 
 echo "engine-parity: ${#TESTS[@]} tests -> $OUT (jobs=$JOBS)"

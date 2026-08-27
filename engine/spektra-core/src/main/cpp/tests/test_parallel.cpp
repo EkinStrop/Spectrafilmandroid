@@ -206,8 +206,8 @@ int main(int argc, char** argv) {
     //    (max_abs==0). Input is deterministic: the 64x64 fixture tiled with
     //    wraparound, scaled by a horizontal ramp so blocks see different density
     //    statistics (uneven per-block cost is exactly what the dynamic scheduler
-    //    exists for). Grain only — halation adds serial blurs already covered
-    //    above and would only slow the gate down.
+    //    exists for). Grain only — halation's (now-parallel) blurs are already
+    //    covered by scenarios 3-4 and would only slow the gate down.
     {
         const int w2 = 192, h2 = 160;
         const int npix2 = w2 * h2;  // 30,720 px -> 4 grain blocks of <=8192

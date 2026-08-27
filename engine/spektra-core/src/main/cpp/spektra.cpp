@@ -23,12 +23,13 @@
  *   - output_cctf_encoding  -> ScanningParams.output_cctf_encoding
  *   - preview_max_size      -> used by spk_simulate_preview for the downscale target.
  *
- * Honoured stochastic/spatial toggles:
- *   - halation_active -> spatial-effects branch (in-emulsion scatter + halation +
- *     DIR-coupler diffusion + scanner unsharp).
- *   - grain_active    -> stochastic AgX particle grain (model/grain.cpp), applied
- *     to the post-coupler film density. Off by default (the deterministic goldens).
- *   - auto_exposure / glare remain off (baked defaults) for the parity routes.
+ * Honoured stochastic/spatial toggles (historical note — today the FULL
+ * spk_params surface is honoured; every effect self-gates on its own params,
+ * auto-exposure is fully wired with its own golden, and the deterministic
+ * parity goldens simply run with the stochastic stages off):
+ *   - halation_active -> in-emulsion scatter + halation (per-effect gating for
+ *     the rest since E1).
+ *   - grain_active    -> stochastic AgX particle grain (model/grain.cpp).
  */
 #include "spektra.h"
 
@@ -166,15 +167,19 @@ struct spk_engine {
 
     // Per-render setup caches (PERF). Every simulate() otherwise re-parses the
     // film/print profile JSON and rebuilds the filming tc_lut from scratch, even
-    // on an interactive slider drag that changed nothing about the profile. Both
-    // are keyed PURELY by the profile id, which maps to an immutable bundled
-    // asset, so a cache entry can never go stale across param changes — the
-    // returned value is byte-identical to a fresh parse/build (a memo, not an
-    // approximation). build_filming_tc_lut depends only on (film profile, the
-    // immutable spectra LUT, the D55 constant); the hanatos window/surface/blur
-    // toggles are hardcoded constants, not params, so it too is a pure function
-    // of the film id. Never evicted (28 bundled profiles, bounded), so node
-    // references stay valid. Guarded by cache_mutex.
+    // on an interactive slider drag that changed nothing about the profile.
+    // profile_cache is keyed purely by the profile id (immutable bundled asset —
+    // can never go stale). tc_lut_cache is keyed by engine_tc_lut()'s composite
+    // key: film id PLUS every build input that IS a live param — spectral
+    // Gaussian blur, the hanatos window/surface toggles, the camera UV/IR
+    // band-pass triples, and input_gamut_compress (see engine_tc_lut below; a
+    // key that dropped any of these would serve stale tc_luts across a settings
+    // change). Entries are never evicted, so node references stay valid — which
+    // also means non-default continuous params (blur sigma, UV/IR floats) add
+    // one ~885 KB entry PER DISTINCT VALUE for the engine's lifetime; the
+    // default path keeps the bare film-id key (28 bundled profiles, bounded).
+    // Bounding the non-default entries (LRU, like kernels/lut3d_cache) is an
+    // open item tracked in docs/AUDIT.md. Guarded by cache_mutex.
     std::mutex cache_mutex;
     std::map<std::string, spk::Profile> profile_cache;   // id -> parsed Profile
     std::map<std::string, spk::NdArray> tc_lut_cache;    // film id -> filming tc_lut
@@ -364,14 +369,15 @@ static spk::Profile load_engine_profile(spk_engine* eng, const std::string& id) 
 }
 
 // Cached filming tc_lut, keyed by (film id, spectral_gaussian_blur, apply_window,
-// apply_surface). For the DEFAULT toggles (blur==0, window on, surface off) the key
-// is just the film id and the cached LUT is byte-identical to rebuilding it
-// (build_filming_tc_lut is a pure function of film profile, the immutable spectra
-// LUT, the D55 constant, the blur sigma, and the window/surface toggles). A
-// non-default toggle (or non-zero blur) gets its own cache slot so distinct
-// adaptations never collide. Returns a reference into the never-evicted cache map
-// (node references stay valid). Throws on build failure (caller maps to
-// SPK_ERR_ASSET_IO, as the inline build did).
+// apply_surface, camera UV/IR band-pass triples, input_gamut_compress) — every
+// live param the build consumes. For the DEFAULT values the key is just the film
+// id and the cached LUT is byte-identical to rebuilding it (build_filming_tc_lut
+// is a pure function of film profile, the immutable spectra LUT, the D55
+// constant, and those inputs). A non-default value gets its own cache slot so
+// distinct adaptations never collide. Returns a reference into the never-evicted
+// cache map (node references stay valid; see the growth note on tc_lut_cache
+// above). Throws on build failure (caller maps to SPK_ERR_ASSET_IO, as the
+// inline build did).
 static const spk::NdArray& engine_tc_lut(spk_engine* eng,
                                          const std::string& film_id,
                                          const spk::Profile& film,
@@ -2148,7 +2154,7 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     // of the whole image, and the lattice is not an image. So the contract is that
     // the CALLER applies the exposure gain to its pixels BEFORE the LUT lookup;
     // this bake emits the pure pointwise transform at unity gain. See the
-    // spk_bake_cube_lut docs in spektra.h and docs/CAMERA_PLAN.md.
+    // spk_bake_cube_lut docs in spektra.h.
     bp.auto_exposure = 0;
 
     // --- Build the identity lattice as an spk_image --------------------------

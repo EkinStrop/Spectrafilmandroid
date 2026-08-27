@@ -124,8 +124,10 @@ FilmingParams digest_filming_params(bool is_negative, bool spatial_effects = fal
 // digest under deactivate_stochastic_effects=False (grain.active stays True) and
 // deactivate_spatial_effects=False (grain.blur stays 0.65). The
 // density_max_curves are NOT set here — they are filled by develop() from the
-// film's normalized density curves (nanmax over the log-exposure axis). Only the
-// non-sublayer path is wired (sublayers/micro-structure deferred).
+// film's normalized density curves (nanmax over the log-exposure axis). BOTH
+// grain paths are wired: the non-sublayer path and the sublayer/micro-structure
+// path (model/grain.h; sublayers_active/n_sub_layers/micro_structure flow
+// through spektra.cpp, gated statistically by tests/test_grain_sublayer.cpp).
 void digest_grain_params(FilmingParams& p);
 
 // Fill p.halation from the film's halation preset tags (info.use / info.antihalation

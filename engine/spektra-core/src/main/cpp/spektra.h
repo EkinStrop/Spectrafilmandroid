@@ -12,8 +12,8 @@
  * --------------------------------------------------------------------------------
  * This header is the stable contract between the JVM/JNI layer and the native
  * engine. It mirrors spektrafilm's public surface: simulate(image, params) and the
- * RuntimePhotoParams tree. Implementation lands in M3–M4 (see docs/PORTING_PLAN.md);
- * in M0 these are declarations only.
+ * RuntimePhotoParams tree. The engine behind it is fully implemented and
+ * parity-gated (38 host gates, .github/workflows/ci.yml `engine-parity`).
  * --------------------------------------------------------------------------------
  */
 #ifndef SPEKTRA_H
@@ -74,9 +74,9 @@ typedef enum {
 /*
  * Flat parameter struct mirroring RuntimePhotoParams (see SpektraParams.kt and
  * spektrafilm/runtime/params_schema.py). Kept flat (no nested allocations) so it
- * marshals trivially across JNI. Only the high-traffic fields are listed here in
- * M0; the full set is filled in alongside the implementation. Profiles are passed
- * by name and resolved from bundled assets.
+ * marshals trivially across JNI. This is the full honoured surface — every field
+ * below is consumed by the engine unless its own doc says otherwise. Profiles are
+ * passed by name and resolved from bundled assets.
  */
 typedef struct {
     const char* film_profile;   /* e.g. "kodak_portra_400" */
@@ -263,8 +263,13 @@ typedef struct {
      * Ordinals mirror model/gamut_compression.h's enum classes EXACTLY:
      *   output_gamut_compress  (OutputGamutCompress): 0 = kLegacyClip (DEFAULT; the
      *     engine's existing final np.clip in scanning, byte-identical to every golden),
-     *     1 = kOff, 2 = kAcesRgc (ACES RGC v1.3 knee in the linear output space),
-     *     3..6 = perceptual algos (reserved / not yet ported).
+     *     1 = kOff (NOTE: currently behaves exactly like kLegacyClip — the final
+     *     clip is unconditional in scan(); a true no-clip mode is an open item),
+     *     2 = kAcesRgc (ACES RGC v1.3 knee in the linear output space),
+     *     3 = kOklch and 4 = kOklrab (IMPLEMENTED, each with its own CI gate:
+     *     test_gamut_out_oklch / test_gamut_out_oklrab),
+     *     5..6 = kJzazbz / kCam16ucs (reserved / not yet ported — currently fall
+     *     through silently to the legacy clip).
      *   input_gamut_compress   (InputGamutCompress): 0 = kOff (DEFAULT; the filming
      *     tc_lut is built exactly as before, byte-identical), 1 = kXy (radial-to-locus
      *     chromaticity bake into the tc_lut), 2 = kOklch (reserved / not yet ported).
@@ -301,7 +306,13 @@ typedef struct {
      * it also leaves any warm slot untouched rather than evicting it.
      * Default 0: memos stay active — previews and every existing caller are
      * unchanged. Does not affect the tc_lut cache or the spectral 3D-LUT memo
-     * (their keys are cheap). Gated by test_simulate_e2e scenario G. */
+     * (their keys are cheap).
+     * NOTE this flag is also the gate for the DIRECT float32 filming path
+     * (EXPORT_FASTPATH item 4): when it is set and the geometry is a no-op,
+     * filming reads the caller's float32 frame via expose_f32_gain and the
+     * float64 image is never materialized — byte-identical by construction
+     * (f32→f64 widening is exact) and gated by the same scenario G
+     * (direct-vs-materialized memcmp, AE-on and spatial-on included). */
     int32_t disable_buffer_memos;
 } spk_params;
 

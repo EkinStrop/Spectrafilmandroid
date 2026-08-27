@@ -34,8 +34,11 @@ namespace spk {
 // sentinel that is local to this engine — the oracle has no clip, the engine does).
 //   kLegacyClip — DEFAULT. No gamut compression; the scanning stage keeps its
 //                 existing final np.clip(0,1). Byte-identical to every golden.
-//   kOff        — oracle "off": pass output RGB through unchanged (no compression,
-//                 and no implied clip). Reserved; not selected by default.
+//   kOff        — oracle "off". NOTE: today this behaves exactly like
+//                 kLegacyClip — scan()'s final np.clip(0,1) is unconditional, so
+//                 no branch implements a true pass-through. Making kOff skip the
+//                 clip is a behavior change needing its own golden (open item in
+//                 docs/AUDIT.md); until then the ordinal is accepted and clips.
 //   kAcesRgc    — ACES Reference Gamut Compression v1.3 (per-channel knee on the
 //                 achromatic distance), applied in the linear output space.
 //   kOklch      — OkLch perceptual chroma reduction toward the output RGB cube

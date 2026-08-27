@@ -1749,6 +1749,10 @@ class MainActivity : ComponentActivity() {
                             val baseName = exportBaseName(exportOptions.customName, System.currentTimeMillis())
                             val longEdge = exportOptions.targetLongEdge()
                             val keepGps = exportKeepGps
+                            // Wall-clock breadcrumbs for the on-device baseline capture
+                            // (issue #119): logcat-visible start marker + duration on ok/fail.
+                            val exportStartMs = System.currentTimeMillis()
+                            Diag.i("export start format=${exportFmt.name}")
                             exporting = true; exportDone = false; status = "rendering full resolution…"
                             scope.launch {
                                 val result = runCatching {
@@ -1796,11 +1800,11 @@ class MainActivity : ComponentActivity() {
                                 }
                                 result.onSuccess { bmp ->
                                     bmp?.let { preview = it }
-                                    Diag.i("export format=${exportFmt.name} ok")
+                                    Diag.i("export format=${exportFmt.name} ok in ${System.currentTimeMillis() - exportStartMs}ms")
                                     exportDone = true
                                     status = "saved to Pictures/Spektrafilm"
                                 }.onFailure {
-                                    Diag.w("export format=${exportFmt.name} failed: ${it.message}")
+                                    Diag.w("export format=${exportFmt.name} failed after ${System.currentTimeMillis() - exportStartMs}ms: ${it.message}")
                                     exporting = false
                                     status = "export failed: ${it.message}"
                                     Toast.makeText(ctx, "Export failed: ${it.message}", Toast.LENGTH_LONG).show()

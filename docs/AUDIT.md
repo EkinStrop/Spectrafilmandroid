@@ -1,378 +1,129 @@
-# Audit — incomplete / open items (updated 2026-07-02)
+# Audit — incomplete / open items (updated 2026-08-27)
 
-A sweep of the codebase and docs for things that are **not complete**: genuine feature gaps,
-stale docs that misstate status, test-coverage holes, and release/build follow-ups. Grouped by
-type, with severity (🔴 notable · 🟡 worth doing · ⚪ minor/by-design). This is a status snapshot,
-not a commitment to do all of it.
+A full three-lane sweep (Kotlin app layer · native engine · build/CI/docs) of everything
+**not complete**: user-facing bugs, silently-lying API surface, coverage holes, stale docs,
+and release follow-ups. Grouped by severity (🔴 notable · 🟡 worth doing · ⚪ minor).
+Status snapshot, not a commitment. The 2026-07-02 audit this replaces — and its long
+resolved-item history — lives in this file's git history; everything still open from it is
+re-verified and carried below.
 
-## A. Feature gaps (engine / app)
+Owner-decision items are tracked as GitHub issues (#138–#144) so they don't rot here.
 
-- ✅ **AAssetManager path wired (2026-06-01).** The native engine now reads profiles, the spectral
-  LUT, and neutral filters **directly from the APK** via `AAssetManager`, so the ~17 MB first-run
-  extraction to `filesDir` is skipped. New C API `spk_engine_create_asset_manager(void*, ...)` +
-  JNI `nativeCreateFromAssets(AssetManager)` + Kotlin `SpektraEngine.fromAssets(assets)`;
-  `MainActivity` tries `fromAssets` first and falls back to the old extract path on failure. All
-  AAsset code is `#ifdef __ANDROID__`-guarded so the host parity build is unchanged; the three
-  loaders gained `parse_*`-from-bytes entry points with the path-based APIs kept as thin wrappers.
-  **Verified:** on-device arm64 parity still `ALL PASS` (max_abs 5.96e-08, FS path byte-identical);
-  fresh-data launch on SM-S948W creates the engine with **no `files/spektra` extraction** and no
-  crash (i.e. `fromAssets` succeeded, no fallback). The long-standing M3 remainder is closed.
-  (Full render/export visual re-confirm pending a screen-unlocked device pass.)
-- 🟡 **Memory tiling for very large RAW** (old issue #7) — still open. Only app-side mitigation
-  exists (OOM-retry ladder in `decodeRawToLinear`, opt-in half-size decode). No native tiling /
-  streaming / GPU path. The full-res scan holds several float buffers of `npix*3` at once.
-  (This entry is the canonical tracker — ROADMAP M6 and the backlog's tiled-pyramid bullet
-  should point here.)
-- ✅ **`use_enlarger_lut` wired (2026-06-01).** The enlarger-side 3D-LUT now accelerates the
-  print-expose spectral integral in `printing.cpp::print_expose` (PCHIP LUT of
-  `_film_cmy_to_print_log_raw` over `[-grain.density_min, nanmax(film.density_curves)]`),
-  mirroring the scanner LUT and the oracle's `spectral_compute_enlarger`. Opt-in / default-off →
-  the default path is **byte-identical** (verified: `test_simulate_e2e` `print_portra` unchanged
-  at 5.11e-07). LUT path converges with resolution (res 17 ≈1.1e-4, res 64 ≈1.9e-6 vs direct) —
-  the print-expose integral is less smooth than the scanner's, so its bands are looser. Gated by
-  the new `test_enlarger_lut_e2e` in CI `engine-parity`. No reserved engine LUT flag remains.
-- ⚪ **Enlarger lens blur** intentionally unwired (no oracle call site to validate against).
-- ✅ **`spectral_gaussian_blur`** WIRED. `build_filming_tc_lut` blurs the Hanatos2025 spectra LUT
-  along its spectral axis (scipy.ndimage.gaussian_filter sigma=(0,0,σ), mode='reflect',
-  truncate=4.0) before the sensitivity contraction, matching `compute_hanatos2025_tc_lut`. Default
-  0.0 is a strict no-op (all pre-existing goldens reproduce bit-exactly). The UI slider is
-  un-gated. Gated by the `scan_spectral_blur` golden (oracle **c1d0e44**) + `test_spectral_blur_e2e`
-  in CI `engine-parity`.
-- ✅ **`apply_hanatos2025_adaptation_window`/`_surface`** WIRED. `build_filming_tc_lut` now threads
-  both toggles: `apply_window` (default on) folds the white-balance-preserving erf4 band-pass into
-  the per-channel sensitivity before the spectra contraction; `apply_surface` (default off)
-  multiplies the resulting tc_lut per-cell, per-channel by `2**surface`, where `surface` is the
-  poly4 log-exposure-correction surface (`eval_poly4_log_exposure_surface`) evaluated at the film
-  reference-illuminant chromaticity, matching `compute_hanatos2025_tc_lut`'s apply_surface branch.
-  The profile loader parses `hanatos2025_adaptation_surface_params`; the tc_lut + print-route memo
-  cache keys fold both toggles. The default (window on, surface off) is a strict no-op (all
-  pre-existing goldens reproduce bit-exactly). Both UI toggles are un-gated. Gated by the
-  `scan_portra_surface` + `scan_portra_nowindow` goldens (oracle **c1d0e44**) +
-  `test_hanatos_surface_e2e` in CI `engine-parity`.
-- ✅ **Camera UV/IR cut band-pass (`camera.filter_uv` / `filter_ir`)** WIRED (2026-06-04).
-  `build_filming_tc_lut` now applies the camera UV/IR cut filter to the profile sensitivity BEFORE
-  the spectra contraction, mirroring `FilmingStage._rgb_to_film_raw` →
-  `model/color_filters.py::compute_band_pass_filter`: `band = filter_uv*filter_ir` (each
-  `1-amp + amp*sigmoid_erf`, amp clipped to [0,1]) multiplies the sensitivity with a per-channel
-  white-balance normalisation against the film reference illuminant. Gated on
-  `filter_uv[0] > 0 || filter_ir[0] > 0` exactly like the oracle, so the default amplitudes (0,0)
-  are a strict no-op (all pre-existing goldens reproduce bit-exactly). The UI sliders ("UV filter"
-  / "IR filter") were already present + JNI-marshalled; only the engine consumption was missing.
-  The tc_lut + print-route memo cache keys fold the band-pass triples. Gated by the
-  `scan_portra_uvir` golden (oracle **c1d0e44**) + `test_camera_uvir_e2e` in CI `engine-parity`.
-  This was the last self-contained §1 LUT-build-path wiring; §4 (enlarger lens blur) stays unwired
-  by design.
-- ✅ **Enlarger preflash (`preflash_exposure` / `preflash_y_filter_shift` / `preflash_m_filter_shift`)**
-  WIRED (2026-06-04). `printing.cpp::print_expose` now adds the preflash raw term to the print
-  exposure, mirroring `printing.py::_compute_raw_preflash` +
-  `runtime/services/filter_enlarger_source.py::preflash_filtered_illuminant`: a uniform
-  pre-exposure flash of the print paper. The preflash illuminant is
-  `color_enlarger(enlarger source, CC=[c_neutral, m_neutral+preflash_m, y_neutral+preflash_y])`
-  (its OWN filter shifts, NOT the image-exposure shifts); the constant per-channel
-  `raw_preflash = sum_l 10^-base_density[l] * preflash_illuminant[l] * sens[l,k]` is scaled by
-  `preflash_exposure` and added to the print raw AFTER the midgray factor, BEFORE the log10.
-  Gated on `preflash_exposure > 0` exactly like the oracle, so the default (0) is a strict no-op
-  (all pre-existing goldens reproduce bit-exactly). Print route only — affects `print_density_cmy`
-  + `final_rgb`, NOT the film taps, so it is correctly NOT folded into the film-density memo key
-  (`print_expose` re-runs with live preflash params on every call; a film-cache HIT serves the
-  unchanged negative). The UI sliders were already live + JNI-marshalled; only the engine
-  consumption was missing. Gated by the `print_portra_preflash` golden (oracle **c1d0e44**) +
-  `test_preflash_e2e` in CI `engine-parity`.
-- ✅ **Print EXPOSURE-COMPENSATION midgray balance (`exposure_compensation_ev`) +
-  `normalize_print_exposure` / `print_exposure_compensation`** FIXED/WIRED (this PR). The
-  user-reachable bug: on the PRINT route (`scan_film=false`, default "Print auto compensation"
-  ON) the native midgray exposure factor (`runtime/print_digest.cpp::compute_midgray_exposure_factor`)
-  hardcoded `exposure_compensation_ev == 0` and **always returned the UNcompensated factor**, so
-  whenever the user set Camera EV ≠ 0 the print was balanced differently than the oracle. The two
-  enlarger toggles were never consumed at all. Port of
-  `PrintingStage._compute_exposure_factor_midgray` (`runtime/stages/printing.py` c1d0e44 L104-118):
-  the factor is selected by a 4-case branch over (`print_exposure_compensation`,
-  `normalize_print_exposure`) using the UNcompensated midgray (rgb=0.184) AND the COMPENSATED
-  midgray (rgb=0.184·2^`exposure_compensation_ev`) from
-  `FilmingStage._compute_density_spectral_midgray_to_balance_print`
-  (`runtime/stages/filming.py` c1d0e44 L125-134) — the compensated gray uses the SAME camera EV
-  that scales the filming raw (filming.py L57). The branch:
-  `comp && !normalize → factor_midgray_comp/factor_midgray`;
-  `normalize && comp → factor_midgray_comp`; `normalize && !comp → factor_midgray`; `else → 1.0`.
-  The factor is recomputed fresh on every print call (not cached), so the new params need NO
-  cache-key change — the film-density memo gates the negative only, which does not depend on these
-  toggles. **CRITICAL default-no-op:** at `exposure_compensation_ev == 0` the compensated gray
-  equals the uncompensated gray, so the factor is byte-identical to before for every existing EV=0
-  print golden (verified: full engine-parity suite `fail=0`, all pre-existing print goldens
-  bit-exact). Gated by two goldens (oracle **c1d0e44**, both EV=1.5): `print_portra_evcomp`
-  (comp+normalize ON → `factor_midgray_comp`) and `print_portra_evcomp_nonorm` (comp ON, normalize
-  OFF → `factor_midgray_comp/factor_midgray`) pinning both EV-active branches + `test_print_evcomp_e2e`
-  in CI `engine-parity` (which also asserts EV on-vs-off and norm-vs-no-norm each produce a real
-  delta). The UI sliders/toggles were already live + JNI-marshalled; only the engine consumption
-  was missing.
-- 🔎 **Full param-wiring audit (2026-06-05).** A 3-crew end-to-end sweep (filming / printing /
-  scanning+geometry+metering) traced EVERY `spk_params` field UI→facade→JNI→engine-consumer and
-  cross-checked the oracle at `c1d0e44`. Most params are correctly WIRED (exposure, both density
-  gammas, AE + all 7 metering methods, full grain model, DIR active/amount/inhibition, UV/IR,
-  spectral blur, hanatos window/surface, output color spaces + CCTF, geometry incl. the `<1` AA
-  prefilter, scanner/enlarger LUTs, preflash trio, dichroic Y/M, print exposure/gamma, scanner b/w
-  corrections route-gated correctly). **Open findings (NOT yet fixed; severity-ranked):**
-  - 🟡 **`rgb_to_raw_method = MALLETT2019` — DISCLOSED, impl still open (filming).** The UI
-    dropdown now wraps the option in a `GatedBlock` ("MALLETT2019 isn't implemented yet — both
-    options currently render as HANATOS2025", `MainActivity.kt` CouplersSection region), so the
-    user is no longer misled. **No Mallett path exists in C++** — the oracle's real
-    `rgb_to_raw_mallett2019` (`utils/spectral_upsampling.py:283`) remains unported; the value only
-    perturbs the tc_lut cache key. **Open: implement (new spectral basis + oracle golden) vs
-    remove the dropdown option** — decision scheduled as `PRIORITY_ROADMAP` #18.
-  - ✅ **Highlight-boost trio `halation.boost_ev`/`boost_range`/`protect_ev` — WIRED.**
-    `boost_highlights` is ported into `expose` (threaded UNCONDITIONALLY, matching the oracle's
-    spatial-independent placement), gated on `boost_ev > 0`, and parity-gated by
-    `test_highlight_boost_e2e` (golden `scan_portra_boost`, oracle c1d0e44).
-  - ✅ **Spatial-effects conflation under `halation_active` — FIXED (E1, 2026-07-02).** Every
-    spatial effect now gates on its OWN params (zero = inert), exactly matching the oracle's
-    per-effect self-gating; `halation_active` gates ONLY halation/scatter (its UI meaning); the
-    oracle's `deactivate_spatial_effects` debug switch is expressed by zeroing per-effect fields.
-    Parity-gated by `test_spatial_decouple_e2e` (golden `scan_portra_lensblur_nohalation`: lens
-    blur ON with halation OFF — the composition the master gate could not produce). Note the
-    schema-default `scanner_unsharp=(0.7,0.7)` and `dir_diffusion_size_um=20` are therefore live
-    whenever their own gates allow, independent of halation.
-  - ✅ **Print route film grain + spatial — FIXED (E2, 2026-07-02).** `run_print` now runs the
-    SAME per-effect-gated filming as the scan route (halation/scatter, DIR spatial diffusion,
-    camera diffusion, lens blur, AgX grain all honored), matching the oracle's single
-    FilmingStage. Parity-gated by `test_print_spatial_e2e` (golden `print_portra_spatial`;
-    pre-fix the engine sat ~1.8e-2 from it). Grain half checked statistically vs the oracle
-    (mean_abs 1.468e-2 both, max_abs 0.6190 vs 0.6189) — no CI golden (RNG streams differ).
-    ⚠ INTENTIONAL default print-route look change in the app (halation defaults ON).
-  - ⚪ **Dead-but-oracle-consistent UI controls — DISCLOSED (F7, 2026-07-02).** DIR-coupler gamma
-    sliders (`gamma_samelayer_rgb`, 3× `gamma_interlayer_*`) are wrapped in a `GatedBlock`
-    ("set per film stock by the engine — no effect": the oracle's `_apply_film_specifics`
-    overwrites them per-film too); `enlarger_lens_blur` was already GatedBlock-disclosed (no
-    engine call site; vestigial upstream); the Glare section carries an inline "applies on the
-    print route only" note (live on the print route, not dimmed). Removal remains an option if
-    disclosure proves noisy.
-- ✅ **Gamut compression (output + input) — WIRED end-to-end (PR #105 + #109).** Output:
-  ACES RGC v1.3 (`model/gamut_compression.cpp::compress_rgb_aces_rgc`, shared `reinhard_knee`),
-  default `kLegacyClip`, gated by `test_gamut_out_aces`. Input: radial-to-locus xy compression
-  baked into the filming tc_lut (`compress_xy_radial` + `remap_tc_lut_for_compression`), default
-  `kOff`, gated by `test_gamut_in_xy`. Both flags flow spk_params → JNI → `SpektraParams.IoParams`
-  → two dropdowns under Simulation→Output; `input_gamut_compress` is folded into the tc_lut cache
-  key + the film-density memo key. The Reinhard knee stays at the oracle default (0,1,6) — not
-  user-exposed in v1. **Oklch perceptual output GC added (PR #111, P2 #6 slice 1):** `kOklch=3` /
-  facade `OKLCH` — perceptual-hue-preserving chroma compression at constant Oklch(L, h): a
-  Reinhard knee on `C / C_max` with `C_max` regenerated in-engine by a 64×720 bisection, float64
-  matrices from colour-science; opt-in / default-OFF byte-identical, bit-exact to oracle
-  `27bd085`, gated by `test_gamut_out_oklch`, UI option "Oklch (perceptual, keep hue)". The
-  remaining perceptual algos (oklrab `kOklrab=4` / jzazbz `kJzazbz=5` / cam16ucs `kCam16ucs=6`,
-  the last the full CIECAM16) stay OPEN (P2 #6 slices 2-4, reserved enum slots — unported).
-- ✅ **Scanner black/white corrections** (`scanner_white_correction` / `_black_correction` /
-  `_white_level` / `_black_level`) **WIRED (this PR).** Port of
-  `runtime/services/color_reference.py` (`ColorReferenceService`) +
-  `runtime/pipeline.py:45-46`, new native module `runtime/color_reference.{h,cpp}`. A scan-time
-  tone anchor that maps the measured CIE Y at the reference black/white densities to the
-  sRGB-decoded target levels via the shared affine `y_corrected = clip(m*Y+q, 0, 1)`
-  (`_correction_fucntion`), where `m=(white_level-black_level)/(y_white-y_black+1e-10)`,
-  `q=black_level-m*y_black`. It is applied in two coupled places, each route-gated:
-  (a) the **scanning XYZ correction** (`black_white_xyz_correction`, every route except
-  `scan_film`+negative film): per pixel `xyz *= clip(m*Y+q,0,1)/(Y+1e-10)` in `scanning.cpp`;
-  (b) an **exposure correction** re-anchoring midgray — the **printing** exposure correction
-  (`black_white_printing_exposure_correction`, print route + negative paper) folded into the
-  already-plumbed `PrintingParams::bw_exposure_correction`, and the **filming** exposure
-  correction (`black_white_filming_exposure_correction`, `scan_film`+positive film) folded into a
-  new `FilmingParams::bw_exposure_correction` (`raw *= factor` after halation, before log10). The
-  level decode reproduces colour's `_remove_sRGB_cctf` bit-for-bit (cctf decode × the
-  near-identity `RGB_to_RGB(sRGB,sRGB)` mean row-sum residue `1.0000282666666667`). Defaults
-  (both corrections false) are a STRICT no-op — every pre-existing golden reproduces bit-exactly,
-  and the `scan_film`+negative route (the default scan goldens) is a no-op by construction. NOT
-  folded into the film-density memo key: on the print route the corrections only touch
-  `print_expose`/`scan`, not the negative's film density (filming correction is 1.0 for negative
-  film), so a film-cache HIT serves the unchanged negative; the `scan_film` route never consults
-  that cache. The UI sliders were already live + JNI-marshalled; only the engine consumption was
-  missing. Gated by two goldens (oracle **c1d0e44**): `print_portra_bwcorr` (print route: printing
-  exposure + XYZ corrections) and `scan_provia_bwcorr` (`scan_film`+positive film: filming
-  exposure + XYZ corrections, DIR couplers off to isolate the un-gated positive-film coupler
-  branch) + `test_scanner_bwcorr_e2e` in CI `engine-parity`. **This closes audit-action-#2: all
-  named inert engine params are now wired or explicitly resolved.**
-- ✅ **POSITIVE-film DIR-coupler parity gap RESOLVED (2026-06-04).** Surfaced by #74: the
-  `scan_film` route on a POSITIVE film (e.g. `fujifilm_provia_100f`) with DIR couplers ON
-  diverged ~0.32 from the oracle, while couplers-OFF matched to ~2.4e-7 — so the gap was isolated
-  to the positive-film coupler develop. Root cause: the coupler *math* in `model/couplers.cpp`
-  (positive branch: `density_silver = nanmax(density_curves) - density`, interpolate the
-  `-density` curve) was already correct — fed the oracle's exact inputs it reproduced the result
-  to 2.38e-7. The divergence was the **inhibitor matrix**: `runtime/params.cpp`'s
-  `digest_filming_params` ported the negative/positive coupler-gamma branch of
-  `params_builder._apply_film_specifics` (lines 112-122) but **omitted the per-stock override**
-  (lines 149-158) that overwrites the generic positive default `(0.12,0.08,0.06)` with the
-  provia values `gamma_samelayer_rgb=(0.156,0.104,0.078)` (and matching interlayer terms;
-  `fujifilm_velvia_100` likewise). The digest had no access to the stock string. Fix: thread the
-  profile `info.stock` into `digest_filming_params` and apply the velvia/provia gamma overrides
-  AFTER the positive branch (mirroring the oracle order). With the right matrix the full pipeline
-  matches: `film_density_cmy` 0.3206 → 2.38e-7, `final_rgb` 0.158 → 2.27e-7. The override only
-  matches the two Fuji positive stocks, so every pre-existing (negative-film) golden reproduces
-  bit-exactly. Gated by the new `scan_provia_couplers` golden (oracle **c1d0e44**, couplers ON) +
-  `test_provia_couplers_e2e` in CI `engine-parity` (also asserts couplers on-vs-off ACTIVE and
-  byte-identical at `SPK_NUM_THREADS` 1 vs 8).
-- ✅ **Highlight boost (`halation.boost_ev` / `boost_range` / `protect_ev`) WIRED (2026-06-05).**
-  Found inert: the "Boost EV" / "Boost range" / "Protect EV" sliders (`MainActivity.kt:2447`) were
-  live + JNI-marshalled (`spektra.h:186-188`, `getBoostEv/Range/ProtectEv`) and reached the native
-  `HalationParams`, but the engine **dropped them** (`diffusion.cpp` Step 1 was an identity stub),
-  so the sliders did nothing — the one remaining unported piece of engine math
-  (`utils/numba_boost_hightlights.py`). Now ported: `model/diffusion.cpp::apply_highlight_boost`
-  reproduces `boost_highlights` (midgray=0.184), called from `filming.cpp::expose` right after the
-  exposure-comp scale and BEFORE the diffusion filter / lens blur / halation (filming.py:58-60). It
-  lifts every raw value above `raw_x0 = clip(0.184·2^protect_ev, 0, max(raw))` by
-  `k·max_raw·(exp(a·dx)−a·dx−1)`, `a = 28^(1−boost_range)`,
-  `k = (2^boost_ev−1)/(exp(a(1−x0))−a(1−x0)−1)`. It is NOT a spatial effect (the oracle's
-  `params_builder` zeroes only the scatter/halation sigmas under `deactivate_spatial_effects`,
-  never `boost_ev`), so the three params are threaded into `fparams.halation` in BOTH routes
-  regardless of the spatial flag, and folded into `compute_film_cache_key` (the print-route memo).
-  `boost_ev == 0` (schema/UI default) is a strict no-op → every pre-existing golden reproduces
-  bit-exactly. Gated by the new `scan_portra_boost` golden (oracle **c1d0e44**) +
-  `test_highlight_boost_e2e` in CI `engine-parity` (film taps + final_rgb within tol, boost
-  on-vs-off ACTIVE, and byte-identical at `SPK_NUM_THREADS` 1 vs 8). **This was the last inert
-  engine param; no UI-exposed engine param is now a silent no-op.**
-- ⚪ **Glare-on-print** wired but default-OFF and not bit-exact (stochastic per-pixel lognormal) —
-  by design, can't be parity-gated.
-- ✅ **Downscale (`upscale_factor < 1`) anti-aliasing prefilter (RESOLVED).** The UI exposes
-  `upscale_factor` as a `0..4` slider (`MainActivity.kt:2129`), so sub-unity (minifying) values are
-  reachable on the parity-gated `crop_and_rescale` preprocess (NOT the preview proxy — that is the
-  separate `preview_max_size` path). At oracle `c1d0e44`, `ResizingService.crop_and_rescale`
-  (`runtime/services/resize.py:25`) calls `skimage.transform.rescale(image, factor, order=3)` with
-  `anti_aliasing` left at its default. skimage 0.26 resolves `anti_aliasing=None` to **True** whenever
-  an output dimension shrinks with `order>0` (`transform/_warps.py:178-183`), running
-  `scipy.ndimage.gaussian_filter` with `sigma = max(0, (input/output - 1)/2)` per axis, `mode='mirror'`
-  (`_warps.py:195-214`) BEFORE the cubic zoom. The C++ `rescale_cubic_rgb` previously skipped this, so a
-  full-pipeline minifying case diverged from the oracle by `final_rgb` max_abs **1.78e-1** /
-  `film_density_cmy` **3.95e-1**. Fix: port scipy's gaussian_filter1d kernel
-  (`radius = int(4*sigma + 0.5)`, normalised `exp(-0.5 k²/σ²)`, `mirror` boundary) as a separable
-  prefilter in `crop_resize.cpp`, applied only when `factor < 1` (`sigma == 0` for `factor >= 1`, so the
-  upscale path stays byte-identical and every pre-existing golden reproduces bit-exactly). After the fix
-  the minifying case matches `c1d0e44` to `final_rgb` max_abs **5.96e-8** / `film_density_cmy`
-  **2.38e-7**. Gated by the new `scan_portra_downscale` golden (oracle `c1d0e44`) +
-  `test_downscale.cpp` in CI `engine-parity` (asserts the 32×32 geometry, both taps within tol, with a
-  genuine on-vs-off delta).
-- ⚪ **GPU preview accelerator** — a default-OFF experimental GPU LUT preview path now exists
-  (`LutGpuPreview.kt`, Settings → Experimental; renderer + cube parser unit-tested), but it is
-  **unverified on a real GPU** (no GPU/emulator in CI) and the GPU surface lacks zoom/magnifier/
-  compare. Needs on-device verification before promotion. **EXR export** — still deferred
-  (32-bit-float TIFF, including the scene-linear variant, shipped in the export sheet).
-- ⚪ **`RawCoilDecoder`** uses a "naive ACES→sRGB approximation" (`RawCoilDecoder.kt:75`, TODO) for
-  the optional Coil gallery-decode path; not the main edit pipeline.
+## 🔴 Notable — tracked as issues
 
-## B. Stale / inaccurate docs (status drift)
+- **Release due** — the whole #120/#121/#122 perf line (−61% export RSS, O(1) lookups,
+  full parallelization) is merged but unreleased; `v0.9.0` predates it. Also
+  `release.yml` builds on JDK 17 while every gate runs 21. → [#138]
+- **Editor state destroyed by sub-screen navigation** — Settings/About/Diagnostics/curve
+  browser mid-edit → Back lands on the demo image (`EditorScreen` leaves composition;
+  `MainActivity.kt` `when(screen)`). → [#139]
+- **Ultra HDR export is SDR + a flat 1×1 gain map** (`ImagePipeline.kt`
+  `attachNeutralGainmap`, fixed `ratioMax=1.6`) — format name over-promises. → [#140]
+- **Mask compositor allocates unbounded ART-heap planes at export resolution** — ≈1 GB
+  per active mask on a 50 MP export (`MaskCompositor.kt` / `MaskSpatial.kt`); the one
+  seam never moved off-heap/banded. → [#141]
+- **`tc_lut_cache` grows without bound under non-default filming params** — ~885 KB per
+  distinct slider value (spectral blur, UV/IR floats folded raw into the key), never
+  evicted; default path bounded. → [#142]
+- **Params that silently lie** — `MALLETT2019` renders Hanatos while busting the film
+  memo; gamut `kOff` ≡ `kLegacyClip` (clip is unconditional); film-side
+  `glare_*` (4 fields) unconsumed yet `glare_active` busts the memo; `enlarger_lens_blur`
+  unwired; JNI `call_*` fallbacks overwrite physical defaults on a missing getter and the
+  ~126-getter marshaller has zero tests. Comments now tell the truth; behaviors need the
+  decision. → [#143]
+- **README opens by declaring the project abandoned** (owner's own statement; contradicts
+  the active tree) + omits v0.9.0's gamut features and the grain-reproducibility
+  disclosure. Owner's call. → [#144]
 
-- ✅ **`HANDOFF.md` current + consolidated (2026-07-02)** — carries the START-HERE resume block
-  (next task P2 #6 slice 2 = `oklrab`, after the merged `oklch` slice 1), the latest pass state,
-  evergreen operating notes, and a compressed session history (full text of the old session logs
-  lives in the file's git history).
-- ✅ **`docs/PRESETS.md` preset count re-fixed** (2026-07-02) — the 2026-06-01 fix set the count
-  to 21, but `presets.json` now ships **28** (verified on disk). `docs/PRESETS.md`,
-  `docs/ASSETS.md`, and `README.md` now all say 28; presets added after `docs/PRESETS.md` was
-  written are described in `presets.json` itself.
-- ✅ **`docs/ROADMAP.md` drift — resolved and superseded.** The original pre-v0.5.0 freeze
-  (`use_enlarger_lut` flagged reserved/unwired ×4, AAssetManager as the sole remaining M3 item, the
-  "debug-signed release" blocker) was fixed by the earlier re-sync (action #1). The later residual
-  drift (banner stuck at v0.7.0, `apply_hanatos2025_*` "still unwired" ×2, downscale-AA
-  "follow-up", the M6 open-list, no v0.8.0 note) is superseded: ROADMAP refreshed 2026-07-02.
+## 🟡 Worth doing (tracked here)
 
-## C. Test-coverage gaps
+App layer:
+- ~14 `scope.launch` sites on `lifecycleScope` keep running after the editor leaves
+  composition (only magnifier/roi jobs are cancelled) — needs a per-call-site
+  cancellation policy (`MainActivity.kt:268` and the export/preset/bake launches).
+- `SingleFlight` retains the completed `Deferred`'s `LinearImage` (~36 MB) after
+  `invalidate()` (`EngineHelpers.kt:332-348`); `GradeCache.clear()` exists but nothing
+  calls it on source switch (a ~12 MB pristine buffer for the previous image survives).
+- Export success sets the **full-resolution** bitmap as the live preview
+  (`MainActivity.kt` export onSuccess) — 200 MB live bitmap after a 50 MP FULL export.
+- `.mcraw` recognized with a 106-line parser + tests but no frame decode wired (import
+  shows "coming"); masks JSON has no versioned interop schema (`MaskJson.kt`).
+- Manifest hardcodes `Theme.Material.Light` → white cold-start flash in dark mode
+  (needs a DayNight theme + `values-night`).
+- Eyedropper multi-sample still outstanding (`masks/Mask.kt`).
 
-- 🟡 **JVM unit tests exist but instrumented (`androidTest`) coverage is still absent.**
-  JVM suites exist and are green (`EditHistoryTest`, `PresetsRoundTripTest`, `ToneCurveParamsTest`,
-  `CubeLutTest`, `McrawContainerTest`, `AppUpdaterTest`, plus suites added since — e.g.
-  `RotationTest`, `CropConstrainTest`, `BuiltInPresetsAssetTest`); run `:app:testDebugUnitTest`
-  for the authoritative count. The earlier "no Kotlin tests anywhere" claim is **resolved**. Remaining holes: no automation for `ImagePipeline` export
-  quantisation, `DecodedSourceCache`, `EngineHelpers`, or `RawDecoder`/`PngWriter` JNI marshaling
-  (these need Robolectric or an instrumented device run). Only C++ host tests + the LibRaw
-  C++ unit/fuzz tests cover the native layer.
-- ✅ **(Resolved 2026-06-01) `test_output_spaces`, `test_lensblur`, `test_parallel` are now gated**
-  in CI `engine-parity` (`.github/workflows/ci.yml`): all six output color spaces, camera/scanner
-  lens-blur parity, and thread-count invariance run on every push/PR. The earlier "not gated" /
-  stale-`HANDOFF` claims no longer apply.
-- ✅ **(Resolved) `test_params_passthrough` + `test_bake_lut` are now gated** in CI `engine-parity`
-  (`.github/workflows/ci.yml`) — the earlier "not gated" claim is stale. Still run locally only:
-  `test_printing`/`test_scanning` (effectively subsumed by `test_simulate_e2e`), `test_grain`/
-  `test_grain_sublayer` (statistical), and `test_spectral_upsampling` (needs the source-tree `.lut`).
-- 🟡 **`android-emulator` CI job** is gated to manual `workflow_dispatch` + `continue-on-error` (no
-  `/dev/kvm` on hosted runners) — there is no automated emulator/device smoke test on push.
+Engine:
+- **Unwired subsystems' fate**: `gpu/vulkan_compute.*` is a *complete* headless Vulkan
+  compute impl (both kernels + vendored SPIR-V) with **zero call sites** (feeds #127);
+  `ml/segmentation.*` is a stub whose CMake option `SPK_ENABLE_LITERT` is a build trap
+  (`#error`); `kernels/half.cpp` ships dead in the .so and burns a CI slot
+  (PERF_ROADMAP #3 infra that never landed).
+- `io/npy_lut.cpp` resizes to the header-declared shape **before** the truncated-payload
+  bounds check (latent 8 TB-allocation path; bundled-only assets today). The two parsers
+  (`json_min.h`, `npy_lut.cpp`) have no direct/negative tests; `model/glare.cpp` is
+  reached by no e2e (every CI case runs grain-off).
+- Dead ported helpers with zero call sites (candidates for deletion or tests):
+  `conversions.{light_to_density, apply_matrix3, matvec3, density_to_transmittance}`,
+  `spectral.{spectral_wavelength_nm, xyz_from_spectrum}`, `color_output.srgb_cctf_encode`,
+  `gaussian.um_to_pixels`, `spectral_upsampling.fetch_coeffs`, `lut3d.apply_lut_3d_pchip`
+  (+ `build_lut_3d`'s literally-named `fn_inputs_unused` parameter),
+  `print_digest.resolve_neutral_cc(path,…)` (referenced only by the unrun
+  `test_printing`).
+- `test_scanning` / `test_printing` / `test_spectral_upsampling` remain local-only
+  (subsumed by the e2e goldens — fine, but `resolve_neutral_cc(path,…)` hides there).
+- JVM marshaller tests (Kotlin → `spk_params`) — #143 item 5 once the semantics decision
+  lands.
 
-## D. Release / build follow-ups
+Build / CI / docs:
+- `app/lint-baseline.xml` (2026-06-04): 33 entries of which 26 are dependency-staleness
+  and one is a baselined **correctness** check (`Instantiatable` on MainActivity);
+  dependencies pinned Oct/Nov 2024 (AGP 8.7.3, Kotlin 2.0.21, Compose BOM 2024.10.01);
+  2 deps bypass the version catalog (the two `UseTomlInstead` entries).
+- R8 Stage-2 obfuscation + `shrinkResources` still open; no push-triggered emulator
+  smoke (manual `android-emulator` only).
+- `python-lint` byte-compiles 2 of ~9 golden generators (workflow YAML — owner-gated).
+- `docs/screenshots/*.jpg` = 3.1 MB rendered at width=200 (~90% reducible);
+  `HANDOFF.md` regrows between manual compressions (136 KB once; watch it);
+  `docs/PRESETS.md` has 7 undocumented presets + display-name drift on ~8;
+  v0.9.0 is a lightweight tag (checklist prescribes annotated), v0.6.x never tagged,
+  old `v0.1/v0.2` local tags lost; two stale `worktree-agent-*` branches.
 
-- ✅ **R8 enabled (2026-06-04, `a28d30d`).** `isMinifyEnabled = true` (`app/build.gradle.kts:53`),
-  **Stage 1 — shrink only, `-dontobfuscate`** (`app/proguard-rules.pro`), with keep-rules for the
-  four name-based JNI boundaries (`com.spectrafilm.engine.**`, `RawDecoder`, `TiffWriter`,
-  `PngWriter`, `native <methods>`) and enum value/`valueOf` persistence.
-  **On-device release-build smoke — DONE (2026-06-04, SM-S948W / Android 16 / arm64).** A
-  minified release APK ran full RAW import → preview render (`render mode=preview … 187–268ms`) →
-  full-res **12 MP PNG and TIFF export** (`export format=PNG/TIFF 3000x4000 12000000px ok`), with
-  `libsftiff.so` loading via `nativeloader … ok` immediately before the TIFF write — i.e. the
-  name-based JNI keep-rules (engine + RAW/TIFF/PNG writers) all resolve at runtime under R8, no
-  `UnsatisfiedLinkError`/crash/OOM. Captured via the in-app diagnostics `Spektra` breadcrumbs.
-  Remaining: Stage-2 obfuscation; `shrinkResources` not yet enabled.
-- ✅ **Device smoke test — DONE** (issue #5, 2026-05-31, Galaxy S25 Ultra / Android 16 / arm64;
-  see `docs/DEVICE_TEST_REPORT.md`). Native libs load; 16-bit PNG/TIFF + Ultra HDR exports verified;
-  **Samsung Expert RAW decodes via LibRaw**; source EXIF retained, GPS stripped. It also **found a
-  real bug** — exports were capped at the 2048 px preview size (12 MP → ~3 MP), fixed in PR #21.
-  Still open from that pass: lossy/JPEG-XL DNG **fallback** branch, the GPS Settings toggle, and the
-  subjective visual checks (rotate→export orientation, presets/grain/AE, recipe persistence).
-- ✅ **Re-validated on-device at v0.6.3 (2026-06-01, same SM-S948W / Android 16 / arm64).** Fresh
-  `:app:assembleDebug` (JBR 21 + NDK r27 + build-tools 35) → install → launch (COLD 404 ms, no
-  `UnsatisfiedLinkError`; `libspektra.so` loads on arm64) → **full-resolution export = 3060×4080
-  with NO `OutOfMemoryError` / no `149817619`** (the PR #56 off-heap export fix holds). Default
-  export is 8-bit PNG **by Settings choice** (the 16-bit path is `ExportFormat.PNG16`/TIFF). Lint
-  (`:app:lintDebug`) and the 30 JVM unit tests are green on the same toolchain.
-- 🟡 **On-device NEON SIMD speedup magnitude** (the `exp10` work) is still unmeasured — only x86 was
-  profiled; a device timing of a large-RAW export would confirm it.
-- ✅ **Committed `dist/*.apk` removed (2026-06-03).** The repo no longer commits release binaries;
-  they were stale (v0.1–0.3 while the repo was v0.7.0), **16 KB-page-misaligned** (every project
-  `.so` LOAD-aligned `0x1000` → `dlopen`-fail on Android 15 16 KB devices) and **debug-signed**.
-  Releases ship via the signed `release.yml` workflow as GitHub Release assets; the `!dist/*.apk`
-  un-ignore was removed so they don't return.
-- ⚪ **Local tags `v0.1.0`/`v0.2.0` were never pushed** to origin — minor history gap.
+## ⚪ Minor / by-design (kept, disclosed)
 
-## E. Dead code / cleanup
+Enlarger lens blur GatedBlock (no oracle call site); MALLETT2019 GatedBlock disclosure;
+DIR-gamma GatedBlock (film-stock-overwritten; could be hidden instead of dimmed);
+Input-color-space GatedBlock; scan B/W-correction + GPU-preview ad-hoc dimming
+(inconsistent with GatedBlock pattern); `RawCoilDecoder`'s naive ACES→sRGB (gallery
+thumbs only); glare-on-print stochastic → unparityable by design; `bench_stages` is
+explicitly not a gate; grain-field change vs ≤v0.8.0 disclosed in CHANGELOG (⚠).
 
-- ⚪ **`NotYetActiveNote` in `Widgets.kt`** has no *direct* call sites — but it is **not** dead:
-  its wrapper `GatedBlock` (same file) calls it and is still used to gate the **enlarger lens blur**
-  (§4 — "no engine call site", intentionally unwired). The spectral Gaussian blur and the
-  hanatos2025 adaptation window/surface toggles were previously gated here but are now wired and
-  un-gated. So the widget stays as long as §4 (or any future inert param) is gated. (Correction: an
-  earlier draft of this audit wrongly listed it as dead code.)
+## Fixed in the 2026-08-27 audit batch (PR #137)
 
----
+- **#119 unblocked (agent side)**: manifest `<profileable android:shell>`, export
+  start/duration breadcrumbs, `tools/baseline/baseline_wizard.sh` + README.
+- **Parity gate 36 → 38**: the two statistical grain gates (`test_grain`,
+  `test_grain_sublayer`) — the only stage byte-goldens can't cover — verified green
+  locally and wired into `ci.yml` + `run_engine_parity.sh` (drift guard intact).
+- **JNI exception boundary**: all six allocating entry points are function-try-blocks;
+  `std::bad_alloc` → catchable `java.lang.OutOfMemoryError` instead of SIGABRT.
+- **`apply_highlight_boost` boost loop parallelized** (the map #122 missed; 1-vs-8
+  already gated by `test_highlight_boost_e2e`).
+- **Engine comment truth pass**: `kernels/parallel.h` (users + grain scheme),
+  `spektra.cpp` tc_lut key/growth, `spektra.h` (M0 fossils, gamut ordinals 3/4 shipped,
+  `disable_buffer_memos` direct-f32 role), `gamut_compression.h` kOff reality,
+  `params.h` sublayer wiring, filming/autoexposure f32 notes, CMake test-list → pointer
+  to the authoritative ci.yml, dangling `CAMERA_PLAN.md` ref.
+- **App fixes**: recipe auto-save/draft-render/preset-blend/uri-permission failures now
+  logged (were silent); `HowToUseScreen` BackHandler (back no longer exits the app from
+  the guide); export temp files deleted on all paths (try/finally); LUT `.cube` write
+  moved off the main thread; empty custom export size now means full resolution (+ unit
+  test); 11 stale comments corrected (mask pipeline reality, gainmap in-place truth,
+  clipboard scope, garbled fragments); dead code deleted (`HistogramCard` + policy
+  comment re-anchored, `TooltipIconButton`, old `Recipes.save`, `UpdateInfo.apkUrl`,
+  `StockCatalog.isPrintKind`, `BuiltInPresets.byId`, `PRINT_ILLUMINANTS`).
+- **Docs**: 12-file correction batch — gate-count cluster (now 38), stray tool-call XML
+  removed from RELEASE_CHECKLIST, workflows README rewritten from its M0 stub,
+  false LiteRT claims fixed, broken preset id, research docs de-orphaned, version drift
+  (v0.8.0 → v0.9.0 refs), CLAUDE.md CI section (r8-smoke, lint, 16 KB gate).
 
-### Highest-value next actions (suggested, not committed)
-1. ✅ **Re-sync the frozen docs** to v0.7.0 — `docs/RELEASE_CHECKLIST.md` rewritten to the
-   `release.yml` signed-tag flow (no `dist/`) with the explicit 16 KB-page gate, and the stale
-   `docs/ROADMAP.md` status markers flipped. Both also reflect R8 Stage-1 shrink now being enabled.
-2. **Wire or strip the remaining inert engine params.** Investigated end-to-end against the pinned
-   oracle (c1d0e44); none were stale and none were "no oracle call site" (C). Status:
-   - `apply_hanatos2025_*` (window/surface) — **already WIRED** (#69, verified). No action.
-   - `spectral_gaussian_blur` — **already WIRED** (#68). No action.
-   - **camera UV/IR cut (`camera.filter_uv`/`filter_ir`) — WIRED (2026-06-04, #72).** Lowest-risk
-     wireable param: self-contained in the LUT-build path, default-off no-op, full 4-gate parity
-     (`scan_portra_uvir` golden + `test_camera_uvir_e2e`). See §A.
-   - **`preflash_exposure` / `preflash_y/m_filter_shift` — WIRED (2026-06-04, this PR).** Oracle
-     call site: `runtime/stages/printing.py:92-101` (`_compute_raw_preflash`) +
-     `runtime/services/filter_enlarger_source.py:29-32`. Print-route only; `printing.cpp::print_expose`
-     adds the constant preflash raw 3-vector to the print expose (after the midgray factor, before
-     log10), built from the preflash-filtered illuminant + film base density + print sensitivity.
-     Default-off no-op, full 4-gate parity (`print_portra_preflash` golden pinned to c1d0e44 +
-     `test_preflash_e2e`). See §A.
-   - **`scanner_white_correction` / `_black_correction` / `_white_level` / `_black_level` —
-     WIRED (this PR), the LAST #2 follow-up.** Oracle call site:
-     `runtime/services/color_reference.py` (`ColorReferenceService`) + `runtime/pipeline.py:45-46`,
-     ported to `runtime/color_reference.{h,cpp}`. Spans THREE stages (filming exposure correction
-     for `scan_film`+positive film, printing exposure correction for the print route + negative
-     paper, scanning XYZ correction for every route except `scan_film`+negative) via the shared
-     affine `clip(m*Y+q,0,1)`. Default-off strict no-op; full 4-gate parity with TWO goldens pinned
-     to c1d0e44 (`print_portra_bwcorr` + `scan_provia_bwcorr`) + `test_scanner_bwcorr_e2e`. **With
-     this, every named inert engine param from action #2 is resolved — action #2 is CLOSED.** See §A.
-3. **Resolve the open param-wiring-audit findings (2026-06-05, see §A "Full param-wiring audit").**
-   ✅ #1 print EV-compensation + `normalize_print_exposure` — FIXED (#80).
-   ✅ (a) highlight-boost stage — WIRED (`test_highlight_boost_e2e`).
-   ✅ (c) spatial-effects per-effect gating — FIXED (E1, `test_spatial_decouple_e2e`).
-   ✅ (d) print-route grain/spatial — FIXED (E2, `test_print_spatial_e2e`).
-   ✅ (e) DIR-gamma / enlarger-lens-blur / glare disclosure — DONE (F7).
-   Remaining: **(b) 🔴 MALLETT2019 — implement-vs-remove decision** (see §A; scheduled as
-   `PRIORITY_ROADMAP` #18). Any engine fix needs a new oracle golden at `c1d0e44` + the
-   default-no-op/thread-invariant discipline.
-4. **Instrumented (`androidTest`) coverage** for the JNI/marshalling + export-quantisation paths the
-   JVM tests can't reach (needs a device/Robolectric).
-5. Maintainer/device items: the R8 release-build on-device smoke is **DONE** (2026-06-04, see §D —
-   import→render→full-res PNG/TIFF export validated under minify). Remaining: a screen-unlocked
-   subjective visual re-confirm pass; R8 Stage-2 obfuscation; `shrinkResources`.
+*Film modeling powered by spektrafilm (GPLv3).*

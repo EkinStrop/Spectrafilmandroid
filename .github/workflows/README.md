@@ -4,28 +4,27 @@
 
 Runs on every push, PR, and manual dispatch. Six jobs:
 
-| Job | What it gates | Status today |
-|-----|---------------|--------------|
-| **engine-native** | The ported C++ (`engine/spektra-core/src/main/cpp/{model,kernels}`) + JNI bridge compile and link into `libspektra.so` on a host toolchain (JDK provides `jni.h`); checks the exported `spk_*` symbols exist. | **Active** — verified locally. |
-| **engine-parity** | Deterministic stage parity tests (`test_simulate_e2e`, `test_filming`, `test_spatial`) run against bundled assets and committed goldens. Bit-exact gate for the ported pipeline. | **Active**. |
-| **parity** | The standalone `.spkvec` comparator (`tools/parity`) builds via CMake and its `spkvec_selftest` ctest passes (byte-format compatibility between `spkvec.py` and `spkvec_io.h`). | **Active**. |
-| **python-lint** | The Python parity harness (`gen_goldens.py`, `spkvec.py`) byte-compiles. | **Active**. |
-| **android** | Gradle assemble of the app + engine modules (NDK-built `libspektra.so` for all ABIs); uploads the debug APK as the `Spektrafilm-debug-apk` artifact. | **Active**. |
-| **android-emulator** | Downloads the APK built by `android`, boots a KVM-accelerated AVD (API 34, AOSP default, x86\_64), installs the APK, launches `MainActivity`, and asserts no `FATAL EXCEPTION`/`UnsatisfiedLinkError`. | **Manual / advisory (`workflow_dispatch`) — fails in setup on hosted runners; does not gate.** |
+| Job | What it gates |
+|-----|---------------|
+| **engine-native** | The engine C++ + JNI bridge compile and link into `libspektra.so` on a host g++ toolchain (`-Wall -Wextra`; JDK provides `jni.h`); checks the exported `spk_*` symbols exist. |
+| **engine-parity** | The stage-parity gate: **38 `build_run` tests** against bundled assets and committed goldens (e2e goldens pinned to oracle `c1d0e44`), incl. thread-invariance (`SPK_NUM_THREADS` 1 vs 8). `tools/parity/run_engine_parity.sh` mirrors it locally and fails loudly if its table drifts from this job's `build_run` count. |
+| **parity** | The standalone `.spkvec` comparator (`tools/parity`) builds via CMake and its `spkvec_selftest` ctest passes. |
+| **python-lint** | The parity harness scripts (`tools/parity/gen_goldens.py`, `spkvec.py`) byte-compile. |
+| **android** | JDK 21. Runs `:app:testDebugUnitTest`, then `:app:lint` (a hard gate — `abortOnError = true`, baseline at `app/lint-baseline.xml`), assembles the debug APK with the NDK-built `.so` for all 3 ABIs, and runs the **16 KB-page gate** (`zipalign -c -P 16 4` on the APK + `readelf -lW` requiring `0x4000` `LOAD` alignment on every 64-bit `.so`). Uploads the debug APK as `Spektrafilm-debug-apk`. |
+| **android-emulator** | Manual `workflow_dispatch` only, `continue-on-error` (advisory — does not gate). Installs the `android` job's APK on an API 34 x86_64 AVD and asserts `MainActivity` launches with no `FATAL EXCEPTION` / `UnsatisfiedLinkError`. |
 
-### android-emulator details
+## `release.yml`
 
-- **Depends on:** `android` job (via `needs: android` + `actions/download-artifact@v4`).  Reuses the already-built APK rather than rebuilding; no NDK/CMake/Gradle duplication.
-- **AVD:** API 34, target `default` (AOSP — no Google Play/APIs), arch `x86_64`, profile `Nexus 6`.
-- **Emulator flags:** `-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -camera-back none` — headless, software renderer, fastest cold boot.
-- **AVD caching:** `actions/cache@v4` on `~/.android/avd/*` (key `avd-api34-x86_64-v1`).  On a cache hit the AVD creation step is skipped entirely.
-- **Smoke check assertions (both must pass):**
-  1. `logcat -d` must contain **no** line matching `FATAL EXCEPTION` or `UnsatisfiedLinkError` for the `com.spectrafilm.app` process.
-  2. `adb shell dumpsys activity activities` must show `com.spectrafilm.app/.MainActivity` in the activity stack after an 8-second settle wait.
-- **Debug artifacts** (`emulator-smoke-artifacts`): screenshot (`screencap -p`) + full logcat, uploaded with `if: always()` so failures are always debuggable.
-- **KVM note:** GitHub `ubuntu-latest` runners expose `/dev/kvm`; the cloud dev sandbox used for editing does not.  The udev rule `echo 'KERNEL=="kvm"...' | sudo tee /etc/udev/rules.d/99-kvm4all.rules` + `udevadm trigger` grants the runner user KVM access before the emulator boots.
+Fires on a `v*` tag push (or manual dispatch with an existing tag name). Builds a
+**production-signed** release APK from the keystore secrets (`SIGNING_KEYSTORE` + alias/password
+secrets → `keystore.properties`), verifies the signature with `apksigner`, and publishes the APK
+plus a `.sha256` sidecar as GitHub Release assets. Note: builds on **JDK 17**, which differs from
+CI's JDK 21; same NDK r27 / CMake 3.22.1 / build-tools 35.0.0 pins as `ci.yml`.
 
-### Notes
-- `engine-native` uses `-Wall -Wextra` (not `-Werror`) while the JNI layer is still M0 stubs with intentionally-unused parameters; tighten to `-Werror` once the bridge is implemented (M3).
-- Generating *real* golden vectors needs a `spektrafilm` Python environment and runs out-of-CI for now (see `tools/parity/README.md`); CI only byte-compiles the generator. Once the engine port begins (M3), add a step that runs `spkvec_compare` against committed tiny goldens.
-- When the host lands, extend `android` to build all ABIs and (optionally) run instrumented/unit tests.
+## `r8-smoke.yml` (added 2026-08-26)
+
+Manual `workflow_dispatch` only. Builds the **R8-minified** release APK (debug-signed fallback —
+no keystore secrets involved), runs the same 16 KB-page checks as `ci.yml`, and uploads the APK
+as `Spektrafilm-r8-smoke-apk`. Purpose: the CI `android` job builds debug (minify off), so a wrong
+R8 keep-rule surfaces only at runtime — download this artifact and smoke-test it on a device
+**before** tagging a release. See `docs/RELEASE_CHECKLIST.md`.

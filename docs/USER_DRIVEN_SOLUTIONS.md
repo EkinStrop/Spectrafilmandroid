@@ -282,7 +282,7 @@ labels; Snapseed on-device segmentation.
 
 **Hotspot:** the per-pixel 81-band expose integrals in `filming`+`printing` (and `scan`). **Policy:
 approximate proxy / exact export** — GPU/approximation is preview-only; export always runs the exact
-CPU path, so the engine-parity gate (34 tests as of 2026-07-02) is never touched. Levers ranked by speed-per-effort:
+CPU path, so the engine-parity gate (38 tests as of 2026-08-27) is never touched. Levers ranked by speed-per-effort:
 
 | Lever | What | Tier/where | Speedup | Effort | Parity |
 |---|---|---|---|---|---|

@@ -96,7 +96,7 @@ g++ -std=c++17 -O2 -pthread -I. -I../../../../../tools/parity \
 
 A test passes when its output contains no `FAIL` line. `tools/parity/run_engine_parity.sh`
 builds and runs the whole suite locally with the same argv as CI (it fails loudly if its table
-drifts from the workflow's `build_run` count). CI `engine-parity` gates (36 tests):
+drifts from the workflow's `build_run` count). CI `engine-parity` gates (38 tests):
 `simulate_e2e` (goldens + BOTH film-density memos + the print-density memo + per-param key
 completeness), `filming`, `spatial`, `crop_resize`, `downscale` (minification AA prefilter),
 `autoexposure`, `small_preview_aa` (AE metering downscale AA), `diffusion` (+`_e2e`),
@@ -113,7 +113,10 @@ compression), the spektral-param wiring gates
 `highlight_boost_e2e` (the pre-clip highlight-boost in filming.expose),
 `spatial_decouple_e2e` (per-effect spatial gating: lens blur ON / halation OFF),
 `print_spatial_e2e` (print-route filming spatial branch),
-and **`test_parallel`** (thread-invariance, fresh engine per thread count). The param-wiring
+**`test_parallel`** (thread-invariance, fresh engine per thread count), and the
+statistical grain gates `test_grain` + `test_grain_sublayer` (mean preservation +
+noise std vs committed oracle references — the stochastic stage byte goldens
+cannot cover). The param-wiring
 goldens are pinned to oracle SHA `c1d0e44` (see `tools/parity/setup_env.sh`). The exact
 per-test argv is in `.github/workflows/ci.yml` — copy from there rather than guessing.
 
@@ -128,9 +131,11 @@ per-test argv is in `.github/workflows/ci.yml` — copy from there rather than g
 ## CI jobs (`.github/workflows/ci.yml`)
 
 `engine-native` (host C++ build of libspektra), `engine-parity` (stage parity gate), `parity`
-(.spkvec comparator self-test), `python-lint`, `android` (`:app:testDebugUnitTest` + full assemble
-for all ABIs), `android-emulator` (manual dispatch only). `release.yml` builds a signed APK from
-keystore secrets on a `v*` tag push and creates the GitHub Release.
+(.spkvec comparator self-test), `python-lint`, `android` (`:app:testDebugUnitTest` + `:app:lint` +
+full assemble for all ABIs + the 16 KB `zipalign -P 16`/`readelf` alignment gate),
+`android-emulator` (manual dispatch only). `release.yml` builds a signed APK from keystore secrets
+on a `v*` tag push and creates the GitHub Release. `r8-smoke.yml` (manual dispatch) builds the
+R8-minified release APK + 16 KB check, for the pre-tag on-device smoke test.
 
 ## Conventions / gotchas
 

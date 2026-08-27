@@ -164,7 +164,7 @@ best-estimate starting point.
 
 ## Low Light / Night
 
-### Portra 800 — Low Light  (`portra800_endura_lowlight`)
+### Portra 800 — Natural Low Light  (`portra800_endura_natural`)
 **Kodak Portra 800 → Supra Endura.** One of the last fast color negatives, carrying Portra's
 natural warm palette into low light, with more grain and contrast than 400. Shot at box speed.
 Tuning: `grain.blur 0.7` (grain more visible than the slower Portras), halation lifted

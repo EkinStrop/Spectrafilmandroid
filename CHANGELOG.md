@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+### Parallelize the serial per-pixel maps: LUT apply + spatial filters (#122)
+
+Three families of serial hot loops now run through `kernels/parallel`'s
+deterministic fork-join — same arithmetic per pixel/row/column, chunk
+boundaries a pure function of (count, threads), so output stays byte-identical
+for any worker count (36-gate suite green; `test_parallel` extended with
+dedicated LUT-acceleration and diffusion-filter scenarios, all 7 scenarios
+memcmp-identical at 1 vs 8 workers):
+
+- **3D-LUT PCHIP apply** (`kernels/lut3d.cpp`) — the per-pixel interpolation
+  and its input normalization are chunked over pixels. Preview force-enables
+  both spectral LUTs, so this ran serially on every preview frame of both
+  routes.
+- **Gaussian / exponential filters** (`kernels/gaussian.cpp` float32,
+  `kernels/exponential_filter.cpp` float64) — FIR passes and the IIR
+  horizontal sweep chunk over rows; the IIR vertical sweep chunks over columns
+  with chunk-local recurrence state (each column runs the exact serial op
+  sequence); the per-channel de/re-interleave and the exponential surrogate's
+  init/copy/axpy passes chunk over elements. Serves halation, lens blur,
+  scanner blur + unsharp, DIR-coupler diffusion, grain's field blurs, glare.
+- **Optical diffusion filter + halation maps** (`model/diffusion.cpp`) — the
+  direct O(w·h·ks²) convolution and its reflect-pad build chunk over rows; the
+  scatter/halation mix and accumulate loops chunk over elements. (The
+  convolution algorithm itself is unchanged — no separable rewrite; that would
+  touch parity numerics.)
+
+New `parallel_for_weighted(begin, end, unit_work, body)` in
+`kernels/parallel.h`: same deterministic chunking, but the serial-below-
+min-chunk clamp measures pixel-equivalents of work instead of the bare item
+count — a few-thousand-row image no longer collapses to one chunk when each
+row carries a full image width of work.
+
+**Measured** (host, 4-core container, 3.1 MP, median of 3; before ≡ 1 worker,
+which runs the identical serial code path):
+
+| kernel | 1 worker | 4 workers | speedup |
+|---|---:|---:|---:|
+| LUT PCHIP apply (17³) | 255.5 ms | 103.2 ms | 2.5× |
+| Gaussian f64 IIR σ=6 | 155.3 ms | 52.2 ms | 3.0× |
+| Gaussian f64 FIR σ=1.2 | 205.5 ms | 74.5 ms | 2.8× |
+| Gaussian f32 IIR σ=6 | 123.5 ms | 39.4 ms | 3.1× |
+| Gaussian f32 FIR σ=1.2 | 129.3 ms | 37.3 ms | 3.5× |
+| exponential filter (4 px) | 656.4 ms | 251.6 ms | 2.6× |
+| halation scatter+3-bounce | 1801.7 ms | 871.4 ms | 2.1× |
+| diffusion conv (512×384) | 8704.4 ms | 2226.9 ms | 3.9× |
+
+FNV checksums identical across 1/4/8 workers for every kernel.
+
+Route-level (640×480 preview-class renders, every-render memo miss, 4 workers,
+old binary vs new binary — output checksums identical across the two builds):
+print route with both spectral LUTs 213.6 → 174.6 ms (**−18%**), scan route
+with halation 389.1 → 316.8 ms (**−19%**), scan route with halation + the
+Black Pro-Mist diffusion filter at strength 0.8 49.2 s → 13.4 s (**3.66×** —
+the direct convolution dominates that config; an algorithmic replacement is a
+separate, parity-affecting decision).
+
 ### Export fast path, part 2 — retire the full-res float64 intermediates (#121)
 
 A 12 MP export used to allocate and zero-touch ~900 MB of full-resolution

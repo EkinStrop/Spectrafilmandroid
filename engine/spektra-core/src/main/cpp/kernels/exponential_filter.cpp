@@ -17,6 +17,8 @@
 #include <cmath>
 #include <vector>
 
+#include "kernels/parallel.h"
+
 namespace spk {
 
 namespace {
@@ -64,49 +66,55 @@ void gaussian_fir_plane(double* img, int w, int h, double sigma, double truncate
     const int n = h, m = w;
     std::vector<double> tmp(static_cast<size_t>(n) * m, 0.0);
 
-    // Vertical pass.
-    for (int i = 0; i < n; ++i) {
-        double* trow = &tmp[static_cast<size_t>(i) * m];
-        for (int k = -radius; k <= radius; ++k) {
-            double kw = kernel[k + radius];
-            int ii = reflect(i + k, n);
-            const double* irow = &img[static_cast<size_t>(ii) * m];
-            for (int j = 0; j < m; ++j) trow[j] += irow[j] * kw;
+    // Vertical pass. Each output row accumulates independently (img is
+    // read-only here) -> deterministic parallel chunks over rows, weighted by
+    // the m pixels each row covers (byte-identical for any worker count).
+    parallel_for_weighted(0, n, m, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) {
+            double* trow = &tmp[static_cast<size_t>(i) * m];
+            for (int k = -radius; k <= radius; ++k) {
+                double kw = kernel[k + radius];
+                int ii = reflect(i + k, n);
+                const double* irow = &img[static_cast<size_t>(ii) * m];
+                for (int j = 0; j < m; ++j) trow[j] += irow[j] * kw;
+            }
         }
-    }
+    });
     // Horizontal pass (split reflected edges + reflect-free interior to match the
-    // Numba kernel's accumulation order).
-    for (int i = 0; i < n; ++i) {
-        const double* trow = &tmp[static_cast<size_t>(i) * m];
-        double* orow = &img[static_cast<size_t>(i) * m];
-        if (2 * radius >= m) {
-            for (int j = 0; j < m; ++j) {
-                double sval = 0.0;
-                for (int k = -radius; k <= radius; ++k)
-                    sval += trow[reflect(j + k, m)] * kernel[k + radius];
-                orow[j] = sval;
-            }
-        } else {
-            for (int j = 0; j < radius; ++j) {
-                double sval = 0.0;
-                for (int k = -radius; k <= radius; ++k)
-                    sval += trow[reflect(j + k, m)] * kernel[k + radius];
-                orow[j] = sval;
-            }
-            for (int j = radius; j < m - radius; ++j) {
-                double sval = 0.0;
-                for (int k = -radius; k <= radius; ++k)
-                    sval += trow[j + k] * kernel[k + radius];
-                orow[j] = sval;
-            }
-            for (int j = m - radius; j < m; ++j) {
-                double sval = 0.0;
-                for (int k = -radius; k <= radius; ++k)
-                    sval += trow[reflect(j + k, m)] * kernel[k + radius];
-                orow[j] = sval;
+    // Numba kernel's accumulation order). Row i reads tmp row i, writes img row i.
+    parallel_for_weighted(0, n, m, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) {
+            const double* trow = &tmp[static_cast<size_t>(i) * m];
+            double* orow = &img[static_cast<size_t>(i) * m];
+            if (2 * radius >= m) {
+                for (int j = 0; j < m; ++j) {
+                    double sval = 0.0;
+                    for (int k = -radius; k <= radius; ++k)
+                        sval += trow[reflect(j + k, m)] * kernel[k + radius];
+                    orow[j] = sval;
+                }
+            } else {
+                for (int j = 0; j < radius; ++j) {
+                    double sval = 0.0;
+                    for (int k = -radius; k <= radius; ++k)
+                        sval += trow[reflect(j + k, m)] * kernel[k + radius];
+                    orow[j] = sval;
+                }
+                for (int j = radius; j < m - radius; ++j) {
+                    double sval = 0.0;
+                    for (int k = -radius; k <= radius; ++k)
+                        sval += trow[j + k] * kernel[k + radius];
+                    orow[j] = sval;
+                }
+                for (int j = m - radius; j < m; ++j) {
+                    double sval = 0.0;
+                    for (int k = -radius; k <= radius; ++k)
+                        sval += trow[reflect(j + k, m)] * kernel[k + radius];
+                    orow[j] = sval;
+                }
             }
         }
-    }
+    });
 }
 
 struct YvvCoeffs { double B, B1, B2, B3; };
@@ -128,58 +136,71 @@ YvvCoeffs yvv_coeffs(double sigma) {
     return {B, b1 / b0, b2 / b0, b3 / b0};
 }
 
+// The IIR recurrence is serial ALONG each row but rows are independent ->
+// deterministic parallel chunks over rows (byte-identical for any worker count).
 void iir_horizontal(double* img, int w, int h, const YvvCoeffs& c) {
     const int n = h, m = w;
-    for (int i = 0; i < n; ++i) {
-        double* row = &img[static_cast<size_t>(i) * m];
-        double w1, w2, w3;
-        double x0 = row[0];
-        w1 = w2 = w3 = x0;
-        for (int j = 0; j < m; ++j) {
-            double val = c.B * row[j] + c.B1 * w1 + c.B2 * w2 + c.B3 * w3;
-            row[j] = val;
-            w3 = w2; w2 = w1; w1 = val;
+    parallel_for_weighted(0, n, m, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) {
+            double* row = &img[static_cast<size_t>(i) * m];
+            double w1, w2, w3;
+            double x0 = row[0];
+            w1 = w2 = w3 = x0;
+            for (int j = 0; j < m; ++j) {
+                double val = c.B * row[j] + c.B1 * w1 + c.B2 * w2 + c.B3 * w3;
+                row[j] = val;
+                w3 = w2; w2 = w1; w1 = val;
+            }
+            double xn = row[m - 1];
+            double y1, y2, y3;
+            y1 = y2 = y3 = xn;
+            for (int j = m - 1; j >= 0; --j) {
+                double y = c.B * row[j] + c.B1 * y1 + c.B2 * y2 + c.B3 * y3;
+                row[j] = y;
+                y3 = y2; y2 = y1; y1 = y;
+            }
         }
-        double xn = row[m - 1];
-        double y1, y2, y3;
-        y1 = y2 = y3 = xn;
-        for (int j = m - 1; j >= 0; --j) {
-            double y = c.B * row[j] + c.B1 * y1 + c.B2 * y2 + c.B3 * y3;
-            row[j] = y;
-            y3 = y2; y2 = y1; y1 = y;
-        }
-    }
+    });
 }
 
+// Serial DOWN each column, columns independent (state slot j never touches
+// another column) -> deterministic parallel chunks over columns with
+// chunk-local state; every column runs the exact op sequence of the serial
+// row-major sweep, byte-identical for any worker count.
 void iir_vertical(double* img, int w, int h, const YvvCoeffs& c) {
     const int n = h, m = w;
-    std::vector<double> s1(m), s2(m), s3(m);
-    for (int j = 0; j < m; ++j) {
-        double x0 = img[j];
-        s1[j] = s2[j] = s3[j] = x0;
-    }
-    for (int i = 0; i < n; ++i) {
-        double* row = &img[static_cast<size_t>(i) * m];
-        for (int j = 0; j < m; ++j) {
-            double x = row[j];
-            double val = c.B * x + c.B1 * s1[j] + c.B2 * s2[j] + c.B3 * s3[j];
-            row[j] = val;
-            s3[j] = s2[j]; s2[j] = s1[j]; s1[j] = val;
+    parallel_for_weighted(0, m, n, [&](int jb, int je) {
+        const int mc = je - jb;
+        std::vector<double> s1(mc), s2(mc), s3(mc);
+        for (int j = jb; j < je; ++j) {
+            double x0 = img[j];
+            s1[j - jb] = s2[j - jb] = s3[j - jb] = x0;
         }
-    }
-    for (int j = 0; j < m; ++j) {
-        double xn = img[static_cast<size_t>(n - 1) * m + j];
-        s1[j] = s2[j] = s3[j] = xn;
-    }
-    for (int i = n - 1; i >= 0; --i) {
-        double* row = &img[static_cast<size_t>(i) * m];
-        for (int j = 0; j < m; ++j) {
-            double x = row[j];
-            double y = c.B * x + c.B1 * s1[j] + c.B2 * s2[j] + c.B3 * s3[j];
-            row[j] = y;
-            s3[j] = s2[j]; s2[j] = s1[j]; s1[j] = y;
+        for (int i = 0; i < n; ++i) {
+            double* row = &img[static_cast<size_t>(i) * m];
+            for (int j = jb; j < je; ++j) {
+                double x = row[j];
+                double val = c.B * x + c.B1 * s1[j - jb] + c.B2 * s2[j - jb] +
+                             c.B3 * s3[j - jb];
+                row[j] = val;
+                s3[j - jb] = s2[j - jb]; s2[j - jb] = s1[j - jb]; s1[j - jb] = val;
+            }
         }
-    }
+        for (int j = jb; j < je; ++j) {
+            double xn = img[static_cast<size_t>(n - 1) * m + j];
+            s1[j - jb] = s2[j - jb] = s3[j - jb] = xn;
+        }
+        for (int i = n - 1; i >= 0; --i) {
+            double* row = &img[static_cast<size_t>(i) * m];
+            for (int j = jb; j < je; ++j) {
+                double x = row[j];
+                double y = c.B * x + c.B1 * s1[j - jb] + c.B2 * s2[j - jb] +
+                           c.B3 * s3[j - jb];
+                row[j] = y;
+                s3[j - jb] = s2[j - jb]; s2[j - jb] = s1[j - jb]; s1[j - jb] = y;
+            }
+        }
+    });
 }
 
 // _gaussian_filter_2d_large: IIR path; falls back to FIR below sigma 0.5.
@@ -214,12 +235,20 @@ void gaussian_blur_plane_d(double* img, int w, int h, double sigma, double trunc
 void gaussian_blur_per_channel_d(double* img, int w, int h, int channels,
                                  const double* sigmas, double truncate) {
     if (w <= 0 || h <= 0 || channels <= 0) return;
-    const size_t plane = static_cast<size_t>(w) * h;
-    std::vector<double> ch(plane);
+    const int plane = w * h;
+    std::vector<double> ch(static_cast<size_t>(plane));
     for (int c = 0; c < channels; ++c) {
-        for (size_t p = 0; p < plane; ++p) ch[p] = img[p * channels + c];
+        // Deinterleave / re-interleave: per-pixel maps with disjoint writes ->
+        // deterministic parallel chunks.
+        parallel_for(0, plane, [&](int lo, int hi) {
+            for (int p = lo; p < hi; ++p)
+                ch[p] = img[static_cast<size_t>(p) * channels + c];
+        });
         gaussian_blur_plane_d(ch.data(), w, h, sigmas[c], truncate);
-        for (size_t p = 0; p < plane; ++p) img[p * channels + c] = ch[p];
+        parallel_for(0, plane, [&](int lo, int hi) {
+            for (int p = lo; p < hi; ++p)
+                img[static_cast<size_t>(p) * channels + c] = ch[p];
+        });
     }
 }
 
@@ -227,18 +256,26 @@ void exponential_filter_per_channel_d(const double* img, int w, int h, int chann
                                       const double* decay, double* out,
                                       double truncate) {
     if (w <= 0 || h <= 0 || channels <= 0) return;
-    const size_t total = static_cast<size_t>(w) * h * channels;
+    const int total = w * h * channels;
     // result = sum_k amplitude_k * fast_gaussian_filter(img, ratio_k * decay)
-    for (size_t i = 0; i < total; ++i) out[i] = 0.0;
+    // The init / copy / axpy passes are per-element maps -> deterministic
+    // parallel chunks (each element's arithmetic is chunk-independent).
+    parallel_for(0, total, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i) out[i] = 0.0;
+    });
     std::vector<double> sigmas(channels);
-    std::vector<double> comp(total);
+    std::vector<double> comp(static_cast<size_t>(total));
     for (int k = 0; k < kExpN; ++k) {
         for (int c = 0; c < channels; ++c) sigmas[c] = kExpSigmaRatio[k] * decay[c];
-        for (size_t i = 0; i < total; ++i) comp[i] = img[i];
+        parallel_for(0, total, [&](int lo, int hi) {
+            for (int i = lo; i < hi; ++i) comp[i] = img[i];
+        });
         gaussian_blur_per_channel_d(comp.data(), w, h, channels, sigmas.data(),
                                     truncate);
         double a = kExpAmplitude[k];
-        for (size_t i = 0; i < total; ++i) out[i] += a * comp[i];
+        parallel_for(0, total, [&](int lo, int hi) {
+            for (int i = lo; i < hi; ++i) out[i] += a * comp[i];
+        });
     }
 }
 

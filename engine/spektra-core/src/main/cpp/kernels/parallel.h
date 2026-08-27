@@ -63,29 +63,14 @@ constexpr int kParallelMinChunk = 8192;
 // on the existing fixture, so 1-vs-N really compares split work against serial work.
 int parallel_min_chunk();
 
-// Split [begin, end) into up to parallel_num_threads() contiguous, disjoint
-// chunks and run body(chunk_begin, chunk_end) for each — workers on their own
-// threads, the first chunk on the calling thread. Chunk boundaries are a pure
-// function of (count, threads), so for a body that writes only disjoint outputs
-// the result is independent of thread count and scheduling.
-//
-// body MUST be free of cross-iteration shared mutable state.
+namespace detail {
+
+// Dispatch [begin, end) as ceil-divided chunks across nthreads workers (the
+// caller has already resolved and clamped nthreads to >= 2). Chunk boundaries
+// are a pure function of (count, nthreads) — never of thread scheduling.
 template <typename Body>
-void parallel_for(int begin, int end, const Body& body) {
+void parallel_dispatch(int begin, int end, int nthreads, const Body& body) {
     const int count = end - begin;
-    if (count <= 0) return;
-
-    int nthreads = parallel_num_threads();
-    if (nthreads > 1) {
-        const int min_chunk = parallel_min_chunk();
-        const int max_by_work = (count + min_chunk - 1) / min_chunk;
-        nthreads = std::min(nthreads, max_by_work < 1 ? 1 : max_by_work);
-    }
-    if (nthreads <= 1) {
-        body(begin, end);
-        return;
-    }
-
     // Ceil-divide so the chunk boundaries are fixed by (count, nthreads) alone.
     const int chunk = (count + nthreads - 1) / nthreads;
 
@@ -119,6 +104,65 @@ void parallel_for(int begin, int end, const Body& body) {
     body(begin, std::min(begin + chunk, end));
     for (auto& w : workers) w.join();
 #endif  // SPK_USE_TBB
+}
+
+}  // namespace detail
+
+// Split [begin, end) into up to parallel_num_threads() contiguous, disjoint
+// chunks and run body(chunk_begin, chunk_end) for each — workers on their own
+// threads, the first chunk on the calling thread. Chunk boundaries are a pure
+// function of (count, threads), so for a body that writes only disjoint outputs
+// the result is independent of thread count and scheduling.
+//
+// body MUST be free of cross-iteration shared mutable state.
+template <typename Body>
+void parallel_for(int begin, int end, const Body& body) {
+    const int count = end - begin;
+    if (count <= 0) return;
+
+    int nthreads = parallel_num_threads();
+    if (nthreads > 1) {
+        const int min_chunk = parallel_min_chunk();
+        const int max_by_work = (count + min_chunk - 1) / min_chunk;
+        nthreads = std::min(nthreads, max_by_work < 1 ? 1 : max_by_work);
+    }
+    if (nthreads <= 1) {
+        body(begin, end);
+        return;
+    }
+    detail::parallel_dispatch(begin, end, nthreads, body);
+}
+
+// parallel_for for index ranges whose items are HEAVIER than one pixel — a row
+// of an image pass, a column of an IIR sweep, a row of a direct convolution.
+// `unit_work` is the number of pixel-equivalents each index covers (e.g. the
+// image width for a row-parallel pass), so the serial-below-min-chunk clamp
+// measures the real work: clamping by the bare item count would collapse a
+// few-thousand-row image to a single chunk and silently serialize it. Chunk
+// boundaries remain a pure function of (count, threads) exactly as in
+// parallel_for, so a body whose items are computed independently with disjoint
+// writes stays byte-identical for any worker count.
+template <typename Body>
+void parallel_for_weighted(int begin, int end, long long unit_work,
+                           const Body& body) {
+    const int count = end - begin;
+    if (count <= 0) return;
+
+    int nthreads = parallel_num_threads();
+    if (nthreads > 1) {
+        const long long uw = unit_work < 1 ? 1 : unit_work;
+        const long long min_chunk = parallel_min_chunk();
+        const long long total_work = static_cast<long long>(count) * uw;
+        const long long max_by_work = (total_work + min_chunk - 1) / min_chunk;
+        if (max_by_work < static_cast<long long>(nthreads)) {
+            nthreads = static_cast<int>(max_by_work < 1 ? 1 : max_by_work);
+        }
+    }
+    if (nthreads <= 1) {
+        body(begin, end);
+        return;
+    }
+    detail::parallel_dispatch(begin, end, nthreads, body);
 }
 
 }  // namespace spk

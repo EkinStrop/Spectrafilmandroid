@@ -168,9 +168,9 @@ int main(int argc, char** argv) {
     }
 
     // 3) Scan route with grain + halation ON: the stochastic + spatial branch.
-    //    Grain walks a seeded RNG in pixel order and the spatial blurs run serial,
-    //    so this must ALSO be byte-identical across worker counts (only the
-    //    pointwise stages are threaded).
+    //    Grain walks a seeded RNG in pixel order (fixed-block scheduling), and
+    //    the spatial blurs are chunked over rows/columns with per-row/per-column
+    //    state — all of it must be byte-identical across worker counts.
     {
         spk_params p = base;
         p.scan_film = 1;
@@ -231,6 +231,36 @@ int main(int argc, char** argv) {
         ok &= simulate_with_threads(asset_dir, &in2, &p, 1, &r1);
         ok &= simulate_with_threads(asset_dir, &in2, &p, 8, &r8);
         ok &= check_identical("scan_film+grain multi-block 192x160", r1, r8);
+    }
+
+    // 6) Spectral 3D-LUT acceleration ON (print route, BOTH LUTs): the PCHIP
+    //    LUT apply is chunked over pixels (and its input normalization too), so
+    //    the opt-in LUT path must stay byte-identical across worker counts.
+    //    The min-chunk override above makes the 4096-px fixture really split.
+    {
+        spk_params p = base;
+        p.scan_film = 0;
+        p.use_scanner_lut = 1;
+        p.use_enlarger_lut = 1;
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
+        ok &= check_identical("print+scanner_lut+enlarger_lut", r1, r8);
+    }
+
+    // 7) Camera optical diffusion filter ON (scan route, spatial branch): the
+    //    direct O(w*h*ks^2) convolution and its reflect-pad build are chunked
+    //    over rows — byte-identical across worker counts. halation_active
+    //    drives the spatial branch (as in test_diffusion_e2e); the non-default
+    //    strength makes the filter really run.
+    {
+        spk_params p = base;
+        p.scan_film = 1;
+        p.halation_active = 1;
+        p.camera_diffusion_active = 1;
+        p.camera_diffusion_strength = 0.8f;
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 1, &r1);
+        ok &= simulate_with_threads(asset_dir, &in_img, &p, 8, &r8);
+        ok &= check_identical("scan_film+diffusion_filter", r1, r8);
     }
 
     std::printf("%s\n", ok ? "ALL PASS" : "FAIL");

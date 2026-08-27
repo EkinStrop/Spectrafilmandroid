@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "kernels/exponential_filter.h"
+#include "kernels/parallel.h"
 
 // M_PI is not in standard C++ <cmath>; some toolchains gate it behind
 // _USE_MATH_DEFINES / _GNU_SOURCE. Provide the IEEE-754 double value (identical
@@ -82,14 +83,18 @@ void apply_halation_um(double* raw, int w, int h, const HalationParams& params,
                         max_eps(lambda_t_px[2])};
         exponential_filter_per_channel_d(raw, w, h, 3, lt, tail.data());
         // scattered = (1-w_s)*core + w_s*tail ; raw = (1-s)*raw + s*scattered
-        const size_t plane = static_cast<size_t>(w) * h;
-        for (size_t p = 0; p < plane; ++p) {
-            for (int c = 0; c < 3; ++c) {
-                size_t idx = p * 3 + c;
-                double scattered = (1.0 - w_s[c]) * core[idx] + w_s[c] * tail[idx];
-                raw[idx] = (1.0 - s_amount) * raw[idx] + s_amount * scattered;
+        // Per-pixel map, disjoint writes -> deterministic parallel chunks.
+        const int plane = w * h;
+        parallel_for(0, plane, [&](int lo, int hi) {
+            for (int p = lo; p < hi; ++p) {
+                for (int c = 0; c < 3; ++c) {
+                    size_t idx = static_cast<size_t>(p) * 3 + c;
+                    double scattered =
+                        (1.0 - w_s[c]) * core[idx] + w_s[c] * tail[idx];
+                    raw[idx] = (1.0 - s_amount) * raw[idx] + s_amount * scattered;
+                }
             }
-        }
+        });
     }
 
     // Step 3: back-reflection halation.
@@ -120,24 +125,32 @@ void apply_halation_um(double* raw, int w, int h, const HalationParams& params,
 
         std::vector<double> halation_blur(total, 0.0);
         std::vector<double> comp(total);
+        const int ntotal = static_cast<int>(total);
         for (int k = 1; k <= N; ++k) {
             double sk[3];
             for (int c = 0; c < 3; ++c)
                 sk[c] = max_eps(sigma_h_px[c] * std::sqrt(static_cast<double>(k)));
-            for (size_t i = 0; i < total; ++i) comp[i] = raw[i];
+            // Copy / axpy: per-element maps -> deterministic parallel chunks.
+            parallel_for(0, ntotal, [&](int lo, int hi) {
+                for (int i = lo; i < hi; ++i) comp[i] = raw[i];
+            });
             gaussian_blur_per_channel_d(comp.data(), w, h, 3, sk);
             double wk = decay[k - 1];
-            for (size_t i = 0; i < total; ++i) halation_blur[i] += wk * comp[i];
+            parallel_for(0, ntotal, [&](int lo, int hi) {
+                for (int i = lo; i < hi; ++i) halation_blur[i] += wk * comp[i];
+            });
         }
-        const size_t plane = static_cast<size_t>(w) * h;
-        for (size_t p = 0; p < plane; ++p) {
-            for (int c = 0; c < 3; ++c) {
-                size_t idx = p * 3 + c;
-                double v = raw[idx] + a_tot[c] * halation_blur[idx];
-                if (params.halation_renormalize) v = v / (1.0 + a_tot[c]);
-                raw[idx] = v;
+        const int plane = w * h;
+        parallel_for(0, plane, [&](int lo, int hi) {
+            for (int p = lo; p < hi; ++p) {
+                for (int c = 0; c < 3; ++c) {
+                    size_t idx = static_cast<size_t>(p) * 3 + c;
+                    double v = raw[idx] + a_tot[c] * halation_blur[idx];
+                    if (params.halation_renormalize) v = v / (1.0 + a_tot[c]);
+                    raw[idx] = v;
+                }
             }
-        }
+        });
     }
 }
 
@@ -418,42 +431,56 @@ void apply_diffusion_filter_um(double* raw, int w, int h,
     };
 
     std::vector<double> blurred(static_cast<size_t>(w) * h * 3);
-    // Build the padded plane for one channel, convolve, write back.
+    // Build the padded plane for one channel, convolve, write back. Both passes
+    // are per-row maps with disjoint writes (padded is fully built before the
+    // convolution reads it, and each channel completes before the next reuses
+    // the plane) -> deterministic parallel chunks, byte-identical for any
+    // worker count.
     std::vector<double> padded(static_cast<size_t>(pw) * ph);
     for (int c = 0; c < 3; ++c) {
-        for (int yy = 0; yy < ph; ++yy) {
-            int sy = reflect(yy - radius, h);
-            for (int xx = 0; xx < pw; ++xx) {
-                int sx = reflect(xx - radius, w);
-                padded[static_cast<size_t>(yy) * pw + xx] =
-                    raw[(static_cast<size_t>(sy) * w + sx) * 3 + c];
+        parallel_for_weighted(0, ph, pw, [&](int lo, int hi) {
+            for (int yy = lo; yy < hi; ++yy) {
+                int sy = reflect(yy - radius, h);
+                for (int xx = 0; xx < pw; ++xx) {
+                    int sx = reflect(xx - radius, w);
+                    padded[static_cast<size_t>(yy) * pw + xx] =
+                        raw[(static_cast<size_t>(sy) * w + sx) * 3 + c];
+                }
             }
-        }
+        });
         const std::vector<double>& kern = psf[c];
         // mode='same' direct convolution: out[y,x] = sum_{i,j} padded[y+i, x+j]
         // * flip(kern)[i,j], centred. For a symmetric centred kernel the centre
         // offsets (ks-1)/2 == radius, so out[y,x] over the original window maps
         // to padded[y .. y+ks-1, x .. x+ks-1] convolved with the flipped kernel.
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                double acc = 0.0;
-                for (int i = 0; i < ks; ++i) {
-                    const double* prow = &padded[static_cast<size_t>(y + i) * pw + x];
-                    // flip(kern) row index (ks-1-i), reversed columns.
-                    const double* krow = &kern[static_cast<size_t>(ks - 1 - i) * ks];
-                    for (int j = 0; j < ks; ++j) {
-                        acc += prow[j] * krow[ks - 1 - j];
+        // Each output row is an independent O(w*ks^2) accumulation over the
+        // read-only padded plane.
+        parallel_for_weighted(0, h, w, [&](int lo, int hi) {
+            for (int y = lo; y < hi; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    double acc = 0.0;
+                    for (int i = 0; i < ks; ++i) {
+                        const double* prow =
+                            &padded[static_cast<size_t>(y + i) * pw + x];
+                        // flip(kern) row index (ks-1-i), reversed columns.
+                        const double* krow =
+                            &kern[static_cast<size_t>(ks - 1 - i) * ks];
+                        for (int j = 0; j < ks; ++j) {
+                            acc += prow[j] * krow[ks - 1 - j];
+                        }
                     }
+                    blurred[(static_cast<size_t>(y) * w + x) * 3 + c] = acc;
                 }
-                blurred[(static_cast<size_t>(y) * w + x) * 3 + c] = acc;
             }
-        }
+        });
     }
 
-    // E_out = (1 - p_s) * E_in + p_s * blurred.
-    const size_t total = static_cast<size_t>(w) * h * 3;
-    for (size_t i = 0; i < total; ++i)
-        raw[i] = (1.0 - p_s) * raw[i] + p_s * blurred[i];
+    // E_out = (1 - p_s) * E_in + p_s * blurred. Per-element map.
+    const int total = w * h * 3;
+    parallel_for(0, total, [&](int lo, int hi) {
+        for (int i = lo; i < hi; ++i)
+            raw[i] = (1.0 - p_s) * raw[i] + p_s * blurred[i];
+    });
 }
 
 void apply_highlight_boost(double* raw, int w, int h, const HalationParams& params) {

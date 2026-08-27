@@ -1,12 +1,12 @@
 # Roadmap
 
-> **ℹ️ Status synced to v0.8.0 (versionCode 10) — read `CHANGELOG.md` + `HANDOFF.md` +
+> **ℹ️ Status synced to v0.9.0 (versionCode 11) — read `CHANGELOG.md` + `HANDOFF.md` +
 > `docs/AUDIT.md` for the live snapshot.** The milestone *structure* below is still a useful
 > overview, and the per-item status markers have been corrected to match the merged state:
 > - ✅ **v0.8.0 wave:** masking v1, Lightroom-style export sheet (incl. TIFF32F/scene-linear),
 >   `.cube`/CLF LUT export, WB wave, opt-in gamut compression (output ACES-RGC + Oklch
 >   perceptual, input xy-locus), per-effect spatial gating + print-route spatial/grain,
->   engine memos, parity suite now 34 gates.
+>   engine memos, parity suite now 38 gates.
 > - ✅ **`use_enlarger_lut` is wired** (2026-06-01) — opt-in/default-off, default path
 >   byte-identical, gated by `test_enlarger_lut_e2e`. No reserved engine LUT flag remains.
 > - ✅ **AAssetManager APK-direct asset load is done** (2026-06-01) — the engine reads profiles,
@@ -249,6 +249,6 @@ The "do this when literally everything else is done" list:
 ## Cross-cutting
 - CI: build all ABIs; run golden-vector parity tests; lint.
   → Implemented in `.github/workflows/ci.yml` (see `.github/workflows/README.md`): the standing
-  jobs are `engine-native`, `engine-parity` (34 gates), `parity`, `python-lint`, `android`
+  jobs are `engine-native`, `engine-parity` (38 gates), `parity`, `python-lint`, `android`
   (`testDebugUnitTest` + assemble + 16 KB check), and `android-emulator` (manual dispatch only).
 - Each engine PR cites which golden vectors it turned green.

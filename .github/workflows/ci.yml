@@ -304,6 +304,16 @@ jobs:
           # c1d0e44. Pre-fix the engine sat ~1.8e-2 from this golden. Also asserts
           # spatial on-vs-off and SPK_NUM_THREADS 1-vs-8 byte-identical output.
           build_run test_print_spatial_e2e "$ASSET" "$G/print_portra_spatial" tests/scan_portra_input_rgb.f64 "$G"
+          # STATISTICAL GRAIN GATES (previously local-only — the one stage the
+          # byte-exact goldens structurally cannot cover, since its RNG stream
+          # differs from the oracle's). test_grain: non-sublayer grain — mean
+          # preservation + noise std vs the oracle reference. test_grain_sublayer:
+          # sublayer + micro-structure path, plus a distinct-noise-character
+          # assertion vs the non-sublayer path. References are committed
+          # (tests/grain*_ref_*.{spkvec,json}); regenerate with
+          # tests/gen_grain_ref.py / gen_grain_sublayer_ref.py.
+          build_run test_grain "$G/scan_portra/film_density_cmy.spkvec" tests/grain_ref_density.spkvec
+          build_run test_grain_sublayer "$G/scan_portra/film_density_cmy.spkvec" tests/grain_sublayer_ref_density.spkvec "$ASSET/profiles/kodak_portra_400.json"
           exit $fail
 
   # ---------------------------------------------------------------------------

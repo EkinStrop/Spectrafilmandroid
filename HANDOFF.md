@@ -1,6 +1,30 @@
 # Spektrafilm Android — Session Handoff
 
-## Current state (2026-08-27, parallelize the serial per-pixel maps — #122)
+## Current state (2026-08-27 evening, AFK batch: #119 prep + full-app audit — PR #137)
+
+- **#119 agent-side prep SHIPPED**: manifest `<profileable android:shell>` (simpleperf on
+  release builds), export start/duration logcat breadcrumbs, and
+  `tools/baseline/baseline_wizard.sh` — the 8-stage interactive capture runbook the owner
+  runs at home (`bash tools/baseline/baseline_wizard.sh`); writes `docs/baseline-s26u.md`.
+- **Full three-lane audit executed** (Kotlin app / native engine / build+CI+docs);
+  `docs/AUDIT.md` rebuilt to 2026-08-27 truth. Owner decisions filed as **#138–#144**
+  (release due; editor-state loss on sub-screen nav; Ultra HDR flat gainmap; mask-compositor
+  export OOM; tc_lut_cache growth; params-that-lie batch; README lede).
+- **Parity gate is now 38** (was 36): `test_grain` + `test_grain_sublayer` verified green
+  locally and wired into `ci.yml` + `run_engine_parity.sh`. Full suite 38/38 ALL OK on this
+  tree.
+- **Engine hardening landed**: JNI boundary wrapped (bad_alloc → catchable
+  OutOfMemoryError, no more SIGABRT), `apply_highlight_boost` map parallelized, and a
+  comment truth pass (parallel.h, tc_lut cache key/growth, gamut ordinals, M0 fossils).
+- **App fixes landed**: silent failures now logged (recipe save, draft render, preset
+  blend, uri permission), HowToUse BackHandler, export temp-file cleanup on all paths,
+  LUT write off the main thread, empty custom export size = full res (+test), 11 stale
+  comments fixed, 7 dead-code deletions. Docs: 12-file staleness batch.
+- **GPU research (#135) answered earlier today** — `docs/research/gpu-bit-exact.md`;
+  vkdt filmsim (GPLv3, our exact upstream on Vulkan fp32) is the #127 preview seed.
+- Road: owner merges PR #137 → runs the baseline wizard (#119) → #126 targets → #127.
+
+## Prior state (2026-08-27, parallelize the serial per-pixel maps — #122)
 
 - **#122 LANDED (this session): the last serial per-pixel/per-line hot loops now run
   through the deterministic fork-join.** No algorithmic change anywhere — the same
@@ -195,8 +219,8 @@ Per increment: default path byte-identical, opt-in/default-OFF, feature-on withi
   param-wiring goldens pinned at `c1d0e44`** (upstream drift began at `a9bccd6` — never regenerate
   from tip); **gamut primitive goldens generated at `27bd085`**. Checkout the pin SHA before
   generating, restore the branch after; new gen scripts must pin the SHA they generate at.
-- **Parity gate: 34 host tests**; per-test argv is authoritative in `.github/workflows/ci.yml`
-  (copy, never guess) — any doc citing 15/26/31/33 gates is stale. Every engine change: default
+- **Parity gate: 38 host tests**; per-test argv is authoritative in `.github/workflows/ci.yml`
+  (copy, never guess) — any doc citing 15/26/31/33/34/35/36 gates is stale. Every engine change: default
   path byte-identical, feature-on within tol, `SPK_NUM_THREADS` 1≡8, NDK r27 3-ABI build green. All
   new engine features ship opt-in / default-OFF.
 - **Land engine fixes ONE AT A TIME**, one small item per subagent — parallel agents collide on the
@@ -337,4 +361,5 @@ Per increment: default path byte-identical, opt-in/default-OFF, feature-on withi
 `docs/UPSTREAM_SYNC_2026-06-24.md` Strategy-A/B port plan · `docs/IMPROVEMENT_BACKLOG.md` LR-RE'd
 feature list · `docs/PERF_ROADMAP.md` perf plan+policy · `docs/USER_DRIVEN_SOLUTIONS.md` +
 `.claude/skills/spectrafilm-solutions/` the user-need catalog · `docs/RESEARCH_*` / `docs/lightroom-re/`
-RE studies · `docs/PRESETS.md` / `docs/FILM_STOCKS.md` content · `docs/maps/` source-project maps.
+RE studies · `docs/research/` settled deep-dives (gpu-bit-exact.md, highway-vendoring.md) ·
+`docs/PRESETS.md` / `docs/FILM_STOCKS.md` content · `docs/maps/` source-project maps.

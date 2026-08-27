@@ -1,6 +1,6 @@
 # Porting Plan — spektrafilm (Python) → spektra-core (C++/Kotlin)
 
-> **STATUS 2026-07-02: DONE** — the full engine is ported and parity-gated (34 host gates, see
+> **STATUS 2026-07-02: DONE** — the full engine is ported and parity-gated (38 host gates, see
 > CLAUDE.md / ci.yml). Kept as the historical porting map; for current state see docs/AUDIT.md +
 > HANDOFF.md.
 

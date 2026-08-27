@@ -2,9 +2,11 @@
  * Spektrafilm for Android — local-adjustment (mask) editor panel. GPLv3.
  * Film modeling powered by spektrafilm.
  *
- * The user-facing surface of the masking keystone: add a radial mask and limit Exposure / Saturation /
- * Contrast to one area. Edits update [ParamsState.localAdjustments], which `simResultToBitmapGraded`
- * composites on the engine OUTPUT (MaskCompositor) — the film render + parity suite are untouched.
+ * The user-facing surface of the masking keystone: add a radial or gradient mask and limit the full
+ * Tier-A adjustment set (exposure, temp/tint, saturation, hue, contrast, whites/blacks, clarity,
+ * texture, sharpness, highlights, shadows) to one area. Edits update [ParamsState.localAdjustments],
+ * which `simResultToBitmapGraded` composites on the engine OUTPUT (MaskCompositor) — the film render
+ * + parity suite are untouched.
  *
  * v1 is slider-driven (position/size/feather + the adjustment), which is fully verifiable here; the
  * draw-on-the-preview gesture overlay + linear masks come next (gesture feel needs an on-device pass).
@@ -49,7 +51,8 @@ fun MasksSection(
 
     SectionCard("Masks", expanded, { expanded = it }) {
         Text(
-            "Local adjustments: a mask limits Exposure / Saturation / Contrast to one area. A radial " +
+            "Local adjustments: a mask limits the full adjustment set — exposure, temp/tint, " +
+                "saturation, hue, contrast, whites/blacks, and the detail controls — to one area. A radial " +
                 "targets a spot (brighten a face); a gradient ramps across the frame (darken a sky from " +
                 "the top). Composited on the final image — the film render is untouched.",
             style = MaterialTheme.typography.bodySmall,

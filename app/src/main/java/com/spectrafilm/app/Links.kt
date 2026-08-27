@@ -37,7 +37,7 @@ object Links {
     }
 }
 
-/** The installed app version name (e.g. "0.1.0"), or "?" if unavailable. */
+/** The installed app version name (e.g. "0.9.0"), or "?" if unavailable. */
 fun appVersionName(ctx: Context): String =
     runCatching {
         @Suppress("DEPRECATION")

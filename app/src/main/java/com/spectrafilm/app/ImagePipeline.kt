@@ -587,8 +587,8 @@ fun saveToGallery(
     val quality = if (format == ExportFormat.PNG) 100 else jpegQuality.coerceIn(1, 100)
 
     // Ultra HDR: attach a near-neutral gain map so the platform JPEG encoder emits a valid
-    // Ultra HDR JPEG (base SDR + gain map + MPF). No-op below API 34. We mutate a copy's
-    // gainmap reference only; the pixel data is shared and unchanged.
+    // Ultra HDR JPEG (base SDR + gain map + MPF). No-op below API 34. setGainmap mutates
+    // [bmp] IN PLACE (the input bitmap carries the gain map); its pixel data is untouched.
     if (format == ExportFormat.ULTRA_HDR) attachNeutralGainmap(bmp)
 
     // EXIF is only writable (via androidx ExifInterface) for JPEG targets. The exported
@@ -689,53 +689,62 @@ fun saveSimResultAsTiff(
     // output stream open for the entire (potentially large) TiffWriter write.
     val tmpFile = File(ctx.cacheDir, "spectrafilm_export_tmp.tif")
 
-    if (float32) {
-        // 32-bit float TIFF: write the engine's float samples VERBATIM (no quantise/clamp).
-        // result.data is already a direct float32 little-endian off-heap buffer, so no copy.
-        TiffWriter.writeFloat32(
-            rgbFloat = result.data.duplicate(),
-            width = w, height = h, outPath = tmpFile.absolutePath,
-            icc = icc, exifColorSpace = exifCs, software = "Spektrafilm",
-            dateTime = dateTime, packBits = false,
-        )
-    } else {
-        val floatBuf = result.data.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
-        // Quantise float [0,1] -> uint16 [0,65535] into an OFF-HEAP direct buffer (LE uint16).
-        // ByteBuffer.allocateDirect is a managed byte[] on Android — at 100 MP that's ~600 MB on
-        // the ~256 MB ART heap and OOMs. Allocate natively (malloc + NewDirectByteBuffer); fall
-        // back to managed only if the native alloc fails. Freed after the writer consumes it.
-        val nativeBuf = SimResult.allocDirectBuffer(nSamples.toLong() * 2)
-        val rgb16Buf = (nativeBuf ?: ByteBuffer.allocateDirect(nSamples * 2))
-            .order(ByteOrder.LITTLE_ENDIAN)
-        try {
-            for (i in 0 until nSamples) {
-                val v = floatBuf.get(i).coerceIn(0f, 1f)
-                val u16 = (v * 65535f + 0.5f).toInt().coerceIn(0, 65535)
-                // Write as little-endian uint16 (low byte first).
-                rgb16Buf.put((u16 and 0xFF).toByte())
-                rgb16Buf.put(((u16 shr 8) and 0xFF).toByte())
-            }
-            rgb16Buf.flip()
-            TiffWriter.write(
-                rgb16 = rgb16Buf,
-                width = w,
-                height = h,
-                outPath = tmpFile.absolutePath,
-                icc = icc,
-                exifColorSpace = exifCs,
-                software = "Spektrafilm",
-                dateTime = dateTime,
-                packBits = false,        // Uncompressed baseline for maximum compatibility
+    try {
+        if (float32) {
+            // 32-bit float TIFF: write the engine's float samples VERBATIM (no quantise/clamp).
+            // result.data is already a direct float32 little-endian off-heap buffer, so no copy.
+            TiffWriter.writeFloat32(
+                rgbFloat = result.data.duplicate(),
+                width = w, height = h, outPath = tmpFile.absolutePath,
+                icc = icc, exifColorSpace = exifCs, software = "Spektrafilm",
+                dateTime = dateTime, packBits = false,
             )
-        } finally {
-            if (nativeBuf != null) SimResult.freeDirectBuffer(nativeBuf)
+        } else {
+            val floatBuf = result.data.duplicate().order(ByteOrder.nativeOrder()).asFloatBuffer()
+            // Quantise float [0,1] -> uint16 [0,65535] into an OFF-HEAP direct buffer (LE uint16).
+            // ByteBuffer.allocateDirect is a managed byte[] on Android — at 100 MP that's ~600 MB on
+            // the ~256 MB ART heap and OOMs. Allocate natively (malloc + NewDirectByteBuffer); fall
+            // back to managed only if the native alloc fails. Freed after the writer consumes it.
+            val nativeBuf = SimResult.allocDirectBuffer(nSamples.toLong() * 2)
+            val rgb16Buf = (nativeBuf ?: ByteBuffer.allocateDirect(nSamples * 2))
+                .order(ByteOrder.LITTLE_ENDIAN)
+            try {
+                for (i in 0 until nSamples) {
+                    val v = floatBuf.get(i).coerceIn(0f, 1f)
+                    val u16 = (v * 65535f + 0.5f).toInt().coerceIn(0, 65535)
+                    // Write as little-endian uint16 (low byte first).
+                    rgb16Buf.put((u16 and 0xFF).toByte())
+                    rgb16Buf.put(((u16 shr 8) and 0xFF).toByte())
+                }
+                rgb16Buf.flip()
+                TiffWriter.write(
+                    rgb16 = rgb16Buf,
+                    width = w,
+                    height = h,
+                    outPath = tmpFile.absolutePath,
+                    icc = icc,
+                    exifColorSpace = exifCs,
+                    software = "Spektrafilm",
+                    dateTime = dateTime,
+                    packBits = false,        // Uncompressed baseline for maximum compatibility
+                )
+            } finally {
+                if (nativeBuf != null) SimResult.freeDirectBuffer(nativeBuf)
+            }
         }
-    }
 
-    return publishTiffToGallery(ctx, tmpFile, "${displayName ?: "Spektrafilm_${System.currentTimeMillis()}"}.tif")
+        return publishTiffToGallery(ctx, tmpFile, "${displayName ?: "Spektrafilm_${System.currentTimeMillis()}"}.tif")
+    } finally {
+        // Delete on ALL paths: a writer/publish throw must not leave the (potentially
+        // huge) temp file behind in cacheDir. Publish has consumed the bytes by now.
+        tmpFile.delete()
+    }
 }
 
-/** Publish a finished TIFF temp file into the gallery (Pictures/Spektrafilm) under [name]. */
+/**
+ * Publish a finished TIFF temp file into the gallery (Pictures/Spektrafilm) under [name].
+ * The caller owns [tmpFile] cleanup (its try/finally deletes it on every path).
+ */
 private fun publishTiffToGallery(ctx: Context, tmpFile: File, name: String): Uri {
     val resolver = ctx.contentResolver
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -753,7 +762,6 @@ private fun publishTiffToGallery(ctx: Context, tmpFile: File, name: String): Uri
         values.clear()
         values.put(MediaStore.Images.Media.IS_PENDING, 0)
         resolver.update(uri, values, null, null)
-        tmpFile.delete()
         uri
     } else {
         // Legacy (API 24..28): write directly to public Pictures dir.
@@ -764,7 +772,6 @@ private fun publishTiffToGallery(ctx: Context, tmpFile: File, name: String): Uri
         ).apply { mkdirs() }
         val destFile = File(dir, name)
         tmpFile.copyTo(destFile, overwrite = true)
-        tmpFile.delete()
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, ExportFormat.TIFF.mime)
@@ -787,18 +794,23 @@ private fun publishTiffToGallery(ctx: Context, tmpFile: File, name: String): Uri
 fun saveLinearInputAsTiff32f(ctx: Context, image: LinearImage, displayName: String? = null): Uri {
     val dateTime = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date())
     val tmpFile = File(ctx.cacheDir, "spectrafilm_export_tmp.tif")
-    TiffWriter.writeFloat32(
-        rgbFloat = image.data.duplicate(),
-        width = image.width,
-        height = image.height,
-        outPath = tmpFile.absolutePath,
-        icc = null,                                  // scene-linear: untagged (no display-gamma ICC)
-        exifColorSpace = ExifColorSpace.UNCALIBRATED,
-        software = "Spektrafilm (scene-linear ${image.colorSpace})",
-        dateTime = dateTime,
-        packBits = false,
-    )
-    return publishTiffToGallery(ctx, tmpFile, "${displayName ?: "Spektrafilm_${System.currentTimeMillis()}"}_scene-linear.tif")
+    try {
+        TiffWriter.writeFloat32(
+            rgbFloat = image.data.duplicate(),
+            width = image.width,
+            height = image.height,
+            outPath = tmpFile.absolutePath,
+            icc = null,                                  // scene-linear: untagged (no display-gamma ICC)
+            exifColorSpace = ExifColorSpace.UNCALIBRATED,
+            software = "Spektrafilm (scene-linear ${image.colorSpace})",
+            dateTime = dateTime,
+            packBits = false,
+        )
+        return publishTiffToGallery(ctx, tmpFile, "${displayName ?: "Spektrafilm_${System.currentTimeMillis()}"}_scene-linear.tif")
+    } finally {
+        // Delete on ALL paths: a writer/publish throw must not leave the temp behind.
+        tmpFile.delete()
+    }
 }
 
 /**
@@ -822,73 +834,76 @@ fun saveSimResultAsPng16(ctx: Context, result: SimResult, displayName: String? =
     val nSamples = w * h * 3
 
     // Write to a temp file in cacheDir first; avoids holding a MediaStore output stream
-    // open for the whole (potentially large) PNG deflate.
+    // open for the whole (potentially large) PNG deflate. Deleted on ALL paths by the
+    // try/finally below — a writer/publish throw must not leave it behind.
     val tmpFile = File(ctx.cacheDir, "spectrafilm_export_tmp.png")
 
-    // Quantise float [0,1] -> uint16 [0,65535] into an OFF-HEAP direct buffer (LE uint16).
-    // ByteBuffer.allocateDirect is a managed byte[] on Android — ~600 MB at 100 MP → ART OOM.
-    // Allocate natively, falling back to managed only if the native alloc fails; freed after
-    // the writer consumes it.
-    val nativeBuf = SimResult.allocDirectBuffer(nSamples.toLong() * 2)
-    val rgb16Buf = (nativeBuf ?: ByteBuffer.allocateDirect(nSamples * 2))
-        .order(ByteOrder.LITTLE_ENDIAN)
     try {
-        for (i in 0 until nSamples) {
-            val v = floatBuf.get(i).coerceIn(0f, 1f)
-            val u16 = (v * 65535f + 0.5f).toInt().coerceIn(0, 65535)
-            rgb16Buf.put((u16 and 0xFF).toByte())
-            rgb16Buf.put(((u16 shr 8) and 0xFF).toByte())
+        // Quantise float [0,1] -> uint16 [0,65535] into an OFF-HEAP direct buffer (LE uint16).
+        // ByteBuffer.allocateDirect is a managed byte[] on Android — ~600 MB at 100 MP → ART OOM.
+        // Allocate natively, falling back to managed only if the native alloc fails; freed after
+        // the writer consumes it.
+        val nativeBuf = SimResult.allocDirectBuffer(nSamples.toLong() * 2)
+        val rgb16Buf = (nativeBuf ?: ByteBuffer.allocateDirect(nSamples * 2))
+            .order(ByteOrder.LITTLE_ENDIAN)
+        try {
+            for (i in 0 until nSamples) {
+                val v = floatBuf.get(i).coerceIn(0f, 1f)
+                val u16 = (v * 65535f + 0.5f).toInt().coerceIn(0, 65535)
+                rgb16Buf.put((u16 and 0xFF).toByte())
+                rgb16Buf.put(((u16 shr 8) and 0xFF).toByte())
+            }
+            rgb16Buf.flip()
+            PngWriter.write(
+                rgb16 = rgb16Buf,
+                width = w,
+                height = h,
+                outPath = tmpFile.absolutePath,
+                icc = ColorManagement.loadIccBytes(ctx, result.colorSpace),  // embed the matching profile
+                software = "Spektrafilm",
+            )
+        } finally {
+            if (nativeBuf != null) SimResult.freeDirectBuffer(nativeBuf)
         }
-        rgb16Buf.flip()
-        PngWriter.write(
-            rgb16 = rgb16Buf,
-            width = w,
-            height = h,
-            outPath = tmpFile.absolutePath,
-            icc = ColorManagement.loadIccBytes(ctx, result.colorSpace),  // embed the matching profile
-            software = "Spektrafilm",
-        )
-    } finally {
-        if (nativeBuf != null) SimResult.freeDirectBuffer(nativeBuf)
-    }
 
-    val name = "${displayName ?: "Spektrafilm_${System.currentTimeMillis()}"}.png"
-    val resolver = ctx.contentResolver
+        val name = "${displayName ?: "Spektrafilm_${System.currentTimeMillis()}"}.png"
+        val resolver = ctx.contentResolver
 
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(MediaStore.Images.Media.MIME_TYPE, ExportFormat.PNG16.mime)
-            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Spektrafilm")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
-        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: error("MediaStore insert failed for PNG16")
-        resolver.openOutputStream(uri)?.use { out ->
-            tmpFile.inputStream().use { it.copyTo(out) }
-        } ?: error("Could not open MediaStore output stream for PNG16")
-        values.clear()
-        values.put(MediaStore.Images.Media.IS_PENDING, 0)
-        resolver.update(uri, values, null, null)
-        tmpFile.delete()
-        uri
-    } else {
-        // Legacy (API 24..28): write directly to public Pictures dir.
-        @Suppress("DEPRECATION")
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-            "Spektrafilm"
-        ).apply { mkdirs() }
-        val destFile = File(dir, name)
-        tmpFile.copyTo(destFile, overwrite = true)
-        tmpFile.delete()
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(MediaStore.Images.Media.MIME_TYPE, ExportFormat.PNG16.mime)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, ExportFormat.PNG16.mime)
+                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Spektrafilm")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: error("MediaStore insert failed for PNG16")
+            resolver.openOutputStream(uri)?.use { out ->
+                tmpFile.inputStream().use { it.copyTo(out) }
+            } ?: error("Could not open MediaStore output stream for PNG16")
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            uri
+        } else {
+            // Legacy (API 24..28): write directly to public Pictures dir.
             @Suppress("DEPRECATION")
-            put(MediaStore.Images.Media.DATA, destFile.absolutePath)
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "Spektrafilm"
+            ).apply { mkdirs() }
+            val destFile = File(dir, name)
+            tmpFile.copyTo(destFile, overwrite = true)
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, ExportFormat.PNG16.mime)
+                @Suppress("DEPRECATION")
+                put(MediaStore.Images.Media.DATA, destFile.absolutePath)
+            }
+            resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: Uri.fromFile(destFile)
         }
-        resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: Uri.fromFile(destFile)
+    } finally {
+        tmpFile.delete()
     }
 }

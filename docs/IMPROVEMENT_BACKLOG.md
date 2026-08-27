@@ -15,7 +15,7 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 - ✅ **Linear gradient mask** — shipped (masking v1).
 - ✅ **Radial gradient mask** — shipped (masking v1).
 - **Brush mask** + feather/flow — `ICBCreateBrush`, `ICBBrushMaskToByteArray`. (L)
-- **AI Select Subject** — `ICBSetUPSelectSubjectPipelineConfig` (LiteRt already in our stack). One-tap isolation. (L)
+- **AI Select Subject** — `ICBSetUPSelectSubjectPipelineConfig` (would add LiteRT as a NEW dependency — no LiteRT/TFLite is in the app today; a future ML track, see `docs/PERF_ROADMAP.md`). One-tap isolation. (L)
 - **AI Select Sky** — `ICBSetUPSelectSkyPipelineConfig`, `ICBGenerateDynamicSkyPreset`. Pairs with sky-tint film presets. (M)
 - ✅ **Luminance range mask** — shipped (masking v1).
 - ✅ **Color range mask** (with eyedropper) — shipped (masking v1).
@@ -87,7 +87,7 @@ Effort: S = small, M = medium, L = large. This is a backlog, not a commitment.
 container + linear/radial gradients from §A all landed.)
 1. **HSL / targeted color mix** — emulate film dye responses per band. (M)
 2. **3-way color grading wheels** — defines color-film mood. (M)
-3. **Brush mask + AI Select Subject/Sky** — the remaining §A masks; AI reuses shipped LiteRt. (L)
+3. **Brush mask + AI Select Subject/Sky** — the remaining §A masks; the AI selections need LiteRT, a NEW dependency not currently in the stack (future ML track, see `docs/PERF_ROADMAP.md`). (L)
 4. **Progressive render + pause/refresh** — see `docs/PERF_ROADMAP.md` #5/#6. (L)
 5. **AVIF + HEIC 10-bit export + C2PA option** — modern HDR formats + provenance (we're on TIFF/PNG). (M/L)
 6. **Copy/paste settings + named versions** — turns `EditHistory` into a workflow. (M)

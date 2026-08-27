@@ -96,9 +96,11 @@ NdArray build_filming_tc_lut(const Profile& film, const NdArray& spectra_lut,
                              double in_gamut_knee_limit = 1.0,
                              double in_gamut_knee_power = 6.0);
 
-// expose(): rgb (npix,3, linear ProPhoto, double — the pipeline runs the image
-// as float64) -> log_raw (npix,3). Reuses the project's verified cubic-2D LUT
-// path. `tc_lut` is from build_filming_tc_lut.
+// expose(): rgb (npix,3, linear ProPhoto, double — the materialized pipeline
+// runs the image as float64; one-shot no-op-geometry renders instead use
+// expose_f32_gain below, which widens the caller's float32 frame per pixel
+// load, byte-identically) -> log_raw (npix,3). Reuses the project's verified
+// cubic-2D LUT path. `tc_lut` is from build_filming_tc_lut.
 //
 // When params.spatial_effects is true, the float64 pre-log irradiance `raw` is
 // passed through apply_halation_um (in-emulsion scatter + back-reflection

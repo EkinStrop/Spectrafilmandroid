@@ -8,11 +8,13 @@
  * engine/spektra-core/cpp is touched, and an empty/no-op stack is a strict no-op.
  *
  * Per pixel where the mask is opaque: decode the output CCTF → apply the Tier-A ops in linear/encoded
- * domain → blend `(1−α)·in + α·out`. Wired ops (Class-P, pointwise, parity-safe): **Exposure** (2^EV
- * linear, dodge & burn), **Saturation** (Oklab chroma scale, hue-neutral-gray), **Contrast** (the
- * hue-neutral master S-curve, per channel on the encoded value — same curve as the global control).
- * Temp/tint/whites/blacks/hue land next (temp/tint need an output-space CAT decision); [TierADelta]
- * already carries them.
+ * domain → blend `(1−α)·in + α·out`. All 13 [TierADelta] ops are wired. Class-P (pointwise,
+ * parity-safe): **Exposure** (2^EV linear, dodge & burn), **Temp/Tint** (Bradford chromatic
+ * adaptation 3x3 in linear output RGB), **Saturation** (Oklab chroma scale, hue-neutral-gray),
+ * **Hue** (Oklab rotation), **Contrast** (the hue-neutral master S-curve, per channel on the encoded
+ * value — same curve as the global control), **Whites/Blacks** (encoded levels remap). Class-S
+ * (spatial, luma-only): **Clarity/Texture/Sharpness** (blurred-luma local contrast at three radii)
+ * and **Highlights/Shadows** (regional gain gated by the blurred luma).
  */
 package com.spectrafilm.app.masks
 

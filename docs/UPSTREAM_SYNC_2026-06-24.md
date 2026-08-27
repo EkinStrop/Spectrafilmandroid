@@ -6,7 +6,7 @@
 > np_interp fix (`np_interp` gate). Still open: the remaining perceptual output-GC algos
 > (oklrab/jzazbz/cam16ucs = P2 #6 slices 2-4, reserved enum slots `kOklrab=4`/`kJzazbz=5`/`kCam16ucs=6`);
 > Strategy-B rebaseline tracked as roadmap #20-27 (trigger unfired as of 2026-07-01). Parity gate
-> is now 34 tests.
+> is now 38 tests.
 
 > Provenance: produced by two analysis workflows over the upstream repo at
 > `/home/user/spektrafilm`. Port baseline = oracle `c1d0e44` (the SHA the Android
@@ -211,7 +211,7 @@ Checklist:
 4. In `scanning.cpp`: add a `reinhard_knee` helper; insert a per-pixel `aces_rgc` pass on `lin_rgb` between the XYZ→RGB `parallel_for` (~line 311) and `lens_blur` (line 319); gate the `[0,1]` clip (lines 362-363) so the active path skips it and `LEGACY_CLIP` keeps it verbatim.
 5. Generate `tests/scan_portra_ref_aces_rgc.spkvec` from the committed `c1d0e44` `film_density_cmy` tap with `compress_rgb_aces_rgc(rgb,0.0,1.0,6.0)` (SHA-independent reimplementation of the ~10-line knee — avoids any oracle pin).
 6. Add `tests/test_gamut_compress_e2e.cpp` (modeled on `test_output_spaces.cpp`) asserting both (ON==new golden, OFF==existing `c1d0e44` scan_portra golden).
-7. Wire it into `ci.yml` `engine-parity` with a `SPK_NUM_THREADS` 1-vs-8 invariance check; confirm the full engine-parity gate (34 tests as of 2026-07-02) stays green.
+7. Wire it into `ci.yml` `engine-parity` with a `SPK_NUM_THREADS` 1-vs-8 invariance check; confirm the full engine-parity gate (38 tests as of 2026-08-27) stays green.
 8. Run the full host parity suite; add a Compose UI control; smoke-test a release (R8-minified) build on device before shipping.
 
 ---
@@ -271,7 +271,7 @@ Everything else — Langmuir couplers, the grain overhaul, the N-channel/B&W rew
 
 **Monitor upstream for:**
 - **Merge of `reflectance-upsampling-methods` (or its descendants) into `dev`/`main`** and the blessing of a new oracle SHA — the precondition for any baseline move.
-- **WB-norm stabilization (`e301791` / `526e200`).** This is the trigger event: it changes every neutral by ~2-3% on the default path (`filming.cpp:316-326` `norm[c]` would swap the bare reference illuminant for the reconstructed `neutral_sd` sampled at `_tri2quad(_illuminant_to_xy(reference_illuminant))`). When upstream settles its own regression baselines around this, it is the natural moment to re-pin the full golden set (34 gates as of 2026-07-02) to the new SHA in one bump.
+- **WB-norm stabilization (`e301791` / `526e200`).** This is the trigger event: it changes every neutral by ~2-3% on the default path (`filming.cpp:316-326` `norm[c]` would swap the bare reference illuminant for the reconstructed `neutral_sd` sampled at `_tri2quad(_illuminant_to_xy(reference_illuminant))`). When upstream settles its own regression baselines around this, it is the natural moment to re-pin the full golden set (36 gates as of 2026-08-27) to the new SHA in one bump.
 - **arctic2026 settling on a single method** with generator code (currently only opaque `.npy`; the β04 `.toml` had its `[meta]` block stripped — still moving).
 - **Langmuir K defaults + the `couplers.toml` gamma tables stabilizing**, and the deletion of `high_exposure_couplers_shift` becoming final.
 - **A real B&W end-to-end oracle vector.** Upstream's own `tests/test_channel_generic.py` docstring says "No BW profile exists yet" and validates only synthetic single-channel arrays — until a B&W e2e golden exists, the Android parity gate **cannot even be defined**.

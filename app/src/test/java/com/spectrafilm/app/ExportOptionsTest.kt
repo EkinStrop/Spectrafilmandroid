@@ -50,6 +50,12 @@ class ExportOptionsTest {
     }
 
     @Test
+    fun targetLongEdge_emptyCustomFieldMeansFullRes() {
+        // 0 = the sheet's custom-size field is empty/unset: full resolution, not a 256 px export.
+        assertNull(opts(size = ExportSize.CUSTOM, custom = 0).targetLongEdge())
+    }
+
+    @Test
     fun targetLongEdge_16BitAlwaysFullRes() {
         assertNull(opts(format = ExportFormat.TIFF, size = ExportSize.MEDIUM).targetLongEdge())
         assertNull(opts(format = ExportFormat.PNG16, size = ExportSize.CUSTOM, custom = 1000).targetLongEdge())

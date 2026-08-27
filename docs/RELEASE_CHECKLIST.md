@@ -6,7 +6,7 @@ GitHub Release asset. **APKs are not committed to the repository** — there is 
 and you should never copy a built APK into the repo.
 
 Current in-tree version: **v0.9.0 / versionCode 11** (`minSdk 24`, `targetSdk`/`compileSdk 34`);
-latest released tag is **v0.8.0**.
+latest released tag is **v0.9.0** (tagged 2026-08-26).
 (The R8 release smoke was last device-validated 2026-06-04 on 0.7.x — the 0.9.0 minified build
 gets its pre-tag device smoke from the manual-dispatch `r8-smoke.yml` artifact.)
 
@@ -47,7 +47,7 @@ The single `build-signed-apk` job (Ubuntu runner) then:
 
 - [ ] Bump `versionCode` and `versionName` in `app/build.gradle.kts` (currently `11` / `"0.9.0"`).
 - [ ] Update `CHANGELOG.md` for the new version.
-- [ ] Note: the release build now runs **R8** (`isMinifyEnabled = true`, `app/build.gradle.kts:53`).
+- [ ] Note: the release build now runs **R8** (`isMinifyEnabled = true`, `app/build.gradle.kts:64`).
   This is **Stage 1 — shrink only, `-dontobfuscate`** (`app/proguard-rules.pro:2`), with explicit
   keep-rules for the four name-based JNI boundaries (`com.spectrafilm.engine.**`, `RawDecoder`,
   `TiffWriter`, `PngWriter`, `native <methods>`) and enum value/`valueOf` persistence. Because the
@@ -60,7 +60,9 @@ The single `build-signed-apk` job (Ubuntu runner) then:
   - `engine-parity` — the stage parity gate (deterministic goldens, thread-invariance).
   - `parity` — the `.spkvec` comparator self-test.
   - `python-lint` — byte-compile of the parity harness scripts.
-  - `android` — JVM unit tests + full debug assemble, **including the 16 KB-page-alignment
+  - `android` — JVM unit tests + **`:app:lint`** (`ci.yml:379-388`; a hard gate —
+    `abortOnError = true`, baseline at `app/lint-baseline.xml`) + full debug assemble,
+    **including the 16 KB-page-alignment
     check** (`zipalign -c -v -P 16 4 <apk>` and `readelf -lW` requiring `LOAD` offset `0x4000`
     on every 64-bit `arm64-v8a`/`x86_64` `.so`; 32-bit ABIs are exempt).
   - (`android-emulator` is manual-dispatch only and not a standing gate.)
@@ -131,11 +133,9 @@ used for the `gh release` calls.)
 - `.github/workflows/release.yml:14-21` (triggers), `:60-82` (keystore secrets → `keystore.properties`),
   `:84-92` (assemble + `apksigner verify`), `:94-106` (`.sha256` staging), `:114-131`
   (`gh release create`/`upload`), `:133-136` (keystore cleanup).
-- `.github/workflows/ci.yml:32-176` (gating jobs), `:208-228` (16 KB `zipalign -P 16` +
+- `.github/workflows/ci.yml:33-600` (gating jobs), `:406-427` (16 KB `zipalign -P 16` +
   `readelf -lW` `LOAD 0x4000` check).
-- `app/build.gradle.kts:10-17` (keystore.properties read), `:35-36` (versionCode 10 / 0.8.0),
-  `:53` (`isMinifyEnabled = true` — R8 shrink), `:60-66` (real-keystore-else-debug signing).
+- `app/build.gradle.kts:10-17` (keystore.properties read), `:35-36` (versionCode 11 / 0.9.0),
+  `:64` (`isMinifyEnabled = true` — R8 shrink), `:71-75` (real-keystore-else-debug signing).
 - `app/proguard-rules.pro` (R8 Stage-1 keep-rules: JNI boundary classes + enum persistence,
   `-dontobfuscate`).
-</content>
-</invoke>

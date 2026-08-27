@@ -7,8 +7,8 @@
  *   - ZoomableImage: pinch-zoom + pan + double-tap fit/2x, clamped to bounds.
  *   - CompareSlider: a draggable split handle revealing the input (before) vs the
  *     rendered output (after) in the same frame.
- *   - HistogramCard: RGB + luma histogram of the rendered preview Bitmap, computed
- *     off the main thread and drawn with a Compose Canvas.
+ *   - PreviewHistogramOverlay: compact RGB + luma histogram overlaid on the live
+ *     preview, computed off the main thread and drawn with a Compose Canvas.
  *   - MagnifierOverlay: a full-screen 1:1 view of a real full-resolution crop that
  *     the caller renders through the engine, so dye-cloud grain truly resolves.
  *
@@ -520,35 +520,6 @@ private fun CompareTag(text: String, alignment: Alignment) {
                 .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
                 .padding(horizontal = 6.dp, vertical = 2.dp),
         )
-    }
-}
-
-/**
- * RGB + luma histogram computed from [bitmap] off the main thread and drawn in a small
- * card-sized Canvas. Recomputes whenever the bitmap identity changes.
- */
-@Composable
-fun HistogramCard(bitmap: Bitmap, modifier: Modifier = Modifier) {
-    var hist by remember { mutableStateOf<Histogram?>(null) }
-    LaunchedEffect(bitmap) {
-        hist = withContext(Dispatchers.Default) { computeHistogram(bitmap) }
-    }
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(120.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF101014)),
-    ) {
-        val h = hist
-        if (h == null) {
-            CircularProgressIndicator(
-                modifier = Modifier.align(Alignment.Center).size(24.dp),
-                color = Color.White,
-            )
-        } else {
-            Canvas(Modifier.fillMaxSize().padding(6.dp)) { drawHistogram(h) }
-        }
     }
 }
 

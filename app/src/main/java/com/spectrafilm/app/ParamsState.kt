@@ -57,9 +57,6 @@ val AUTO_EXPOSURE_METHODS = listOf(
     "highlight_weighted", "median", "average",
 )
 
-/** Print illuminants (Illuminants); single bundled option upstream. */
-val PRINT_ILLUMINANTS = listOf("TH-KG3")
-
 /**
  * Flat Compose-state mirror of SpektraParams. Construct from a SpektraParams via
  * [loadFrom]; read back with [toParams].

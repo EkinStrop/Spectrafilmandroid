@@ -10,15 +10,21 @@
  * Port of spektrafilm (GPLv3) by Andrea Volpato — film modeling powered by
  * spektrafilm.
  *
- * A minimal fork-join helper for the engine's embarrassingly-parallel per-pixel
- * stages (expose / scan / print_expose). The range [begin, end) is split into
- * contiguous, disjoint chunks whose boundaries depend ONLY on (count, threads) —
- * never on thread scheduling. Because each pixel is computed independently and
- * written to a disjoint output location, the result is BIT-IDENTICAL to the
- * serial loop for any thread count, which preserves the bit-exact parity gate.
+ * A minimal fork-join helper for the engine's embarrassingly-parallel maps:
+ * the per-pixel stages (expose / scan / print_expose), the DIR-coupler and
+ * density-curve interpolations, the spatial kernels (Gaussian/exponential
+ * filters, diffusion convolution — parallel_for_weighted below), the 3D-LUT
+ * apply, and the element-wise mix/copy passes around them. The range
+ * [begin, end) is split into contiguous, disjoint chunks whose boundaries
+ * depend ONLY on (count, threads) — never on thread scheduling. Because each
+ * item is computed independently and written to a disjoint output location,
+ * the result is BIT-IDENTICAL to the serial loop for any thread count, which
+ * preserves the bit-exact parity gate.
  *
- * NOT for stochastic stages (grain): those walk a seeded RNG in pixel order and
- * must stay serial to remain reproducible.
+ * Stochastic grain does NOT use parallel_for: model/grain.cpp runs its own
+ * fixed-block scheme (deterministic per-block seeding + a dynamic
+ * atomic-counter worker pool) so the seeded RNG stays reproducible per block
+ * regardless of which worker runs it — gated by test_parallel scenario 5.
  */
 #ifndef SPK_KERNELS_PARALLEL_H
 #define SPK_KERNELS_PARALLEL_H

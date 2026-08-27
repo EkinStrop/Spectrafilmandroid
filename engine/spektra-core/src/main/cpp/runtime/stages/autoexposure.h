@@ -35,8 +35,10 @@
  * existing goldens stay byte-identical. A non-default golden (auto_exposure on)
  * exercises the metering path.
  *
- * The metering runs entirely in float64 (numpy double), matching the rest of the
- * engine; only the final scaled buffer is consumed downstream.
+ * The metering arithmetic runs entirely in float64 (numpy double); the
+ * float32 entry point below (measure_auto_exposure_ev_f32, used by the direct
+ * one-shot render path and spk_meter_exposure_ev) reads the caller's float32
+ * frame through exact f32->f64 widening, so both entries meter identically.
  */
 #ifndef SPK_RUNTIME_STAGES_AUTOEXPOSURE_H
 #define SPK_RUNTIME_STAGES_AUTOEXPOSURE_H

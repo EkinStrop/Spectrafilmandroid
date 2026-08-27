@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -50,6 +52,30 @@ void throw_runtime(JNIEnv* env, const char* msg) {
 void throw_status(JNIEnv* env, spk_status st) {
     if (st == SPK_OK) return;
     std::string msg = std::string("spektra: ") + spk_status_str(st);
+    throw_runtime(env, msg.c_str());
+}
+
+// A C++ exception must NEVER unwind through the extern "C" JNI boundary — that
+// is std::terminate/SIGABRT, i.e. a hard native crash instead of a catchable
+// Java error. Every allocating entry point below is a function-try-block that
+// funnels here: std::bad_alloc (any of the engine's full-resolution
+// std::vector allocations failing on a low-memory device) becomes
+// java.lang.OutOfMemoryError — catchable, matching the existing output-buffer
+// OOM path — and anything else becomes a RuntimeException.
+void throw_native_oom(JNIEnv* env) {
+    if (env->ExceptionCheck()) return;
+    jclass oom = env->FindClass("java/lang/OutOfMemoryError");
+    if (oom) {
+        env->ThrowNew(oom, "spektra: native allocation failed (image too large "
+                           "for available memory)");
+        env->DeleteLocalRef(oom);
+    } else {
+        throw_runtime(env, "spektra: native allocation failed");
+    }
+}
+
+void throw_cpp_exception(JNIEnv* env, const std::exception& e) {
+    std::string msg = std::string("spektra: native error: ") + e.what();
     throw_runtime(env, msg.c_str());
 }
 
@@ -489,7 +515,7 @@ bool marshal_params(JNIEnv* env, jobject params, spk_params* out, ParamStorage* 
 
 }  // namespace
 
-JNI(jlong, nativeCreate)(JNIEnv* env, jobject /*thiz*/, jstring assetDir) {
+JNI(jlong, nativeCreate)(JNIEnv* env, jobject /*thiz*/, jstring assetDir) try {
     std::string dir = jstr(env, assetDir);
     if (dir.empty()) {
         // AAssetManager path not yet wired; require an extracted dir.
@@ -501,6 +527,12 @@ JNI(jlong, nativeCreate)(JNIEnv* env, jobject /*thiz*/, jstring assetDir) {
     spk_status st = spk_engine_create(dir.c_str(), &eng);
     if (st != SPK_OK) { throw_status(env, st); return 0; }
     return reinterpret_cast<jlong>(eng);
+} catch (const std::bad_alloc&) {
+    throw_native_oom(env);
+    return 0;
+} catch (const std::exception& e) {
+    throw_cpp_exception(env, e);
+    return 0;
 }
 
 /*
@@ -513,7 +545,7 @@ JNI(jlong, nativeCreate)(JNIEnv* env, jobject /*thiz*/, jstring assetDir) {
  * the extract-then-create path.
  */
 JNI(jlong, nativeCreateFromAssets)(JNIEnv* env, jobject /*thiz*/,
-                                   jobject assetManager) {
+                                   jobject assetManager) try {
 #ifdef __ANDROID__
     if (!assetManager) {
         throw_runtime(env, "spektra: assetManager is null");
@@ -533,13 +565,19 @@ JNI(jlong, nativeCreateFromAssets)(JNIEnv* env, jobject /*thiz*/,
     throw_runtime(env, "spektra: AAssetManager mode unavailable (not Android)");
     return 0;
 #endif
+} catch (const std::bad_alloc&) {
+    throw_native_oom(env);
+    return 0;
+} catch (const std::exception& e) {
+    throw_cpp_exception(env, e);
+    return 0;
 }
 
 JNI(void, nativeDestroy)(JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
     spk_engine_destroy(reinterpret_cast<spk_engine*>(handle));
 }
 
-JNI(jstring, nativeListProfiles)(JNIEnv* env, jobject /*thiz*/, jlong handle) {
+JNI(jstring, nativeListProfiles)(JNIEnv* env, jobject /*thiz*/, jlong handle) try {
     spk_engine* eng = reinterpret_cast<spk_engine*>(handle);
     if (!eng) return env->NewStringUTF("");
     size_t needed = 0;
@@ -549,6 +587,12 @@ JNI(jstring, nativeListProfiles)(JNIEnv* env, jobject /*thiz*/, jlong handle) {
     if (spk_engine_list_profiles(eng, buf.data(), buf.size(), &needed) != SPK_OK)
         return env->NewStringUTF("");
     return env->NewStringUTF(buf.data());
+} catch (const std::bad_alloc&) {
+    throw_native_oom(env);
+    return nullptr;
+} catch (const std::exception& e) {
+    throw_cpp_exception(env, e);
+    return nullptr;
 }
 
 /*
@@ -559,7 +603,7 @@ JNI(jstring, nativeListProfiles)(JNIEnv* env, jobject /*thiz*/, jlong handle) {
  */
 JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
                              jobject inBuf, jint w, jint h, jstring inCs,
-                             jobject paramsObj, jboolean preview) {
+                             jobject paramsObj, jboolean preview) try {
     spk_engine* eng = reinterpret_cast<spk_engine*>(handle);
     if (!eng) { throw_runtime(env, "spektra: engine handle is null"); return nullptr; }
     if (!inBuf) { throw_runtime(env, "spektra: input ByteBuffer is null"); return nullptr; }
@@ -728,6 +772,12 @@ JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
         return nullptr;
     }
     return result;
+} catch (const std::bad_alloc&) {
+    throw_native_oom(env);
+    return nullptr;
+} catch (const std::exception& e) {
+    throw_cpp_exception(env, e);
+    return nullptr;
 }
 
 /*
@@ -773,7 +823,7 @@ Java_com_spectrafilm_engine_SimResult_allocDirectBuffer(JNIEnv* env, jclass /*cl
  */
 JNI(jdouble, nativeMeterExposureEv)(JNIEnv* env, jobject /*thiz*/, jlong handle,
                                     jobject inBuf, jint w, jint h,
-                                    jobject paramsObj) {
+                                    jobject paramsObj) try {
     spk_engine* eng = reinterpret_cast<spk_engine*>(handle);
     if (!eng) { throw_runtime(env, "spektra: engine handle is null"); return 0.0; }
     if (!inBuf) { throw_runtime(env, "spektra: input ByteBuffer is null"); return 0.0; }
@@ -809,6 +859,12 @@ JNI(jdouble, nativeMeterExposureEv)(JNIEnv* env, jobject /*thiz*/, jlong handle,
     spk_status st = spk_meter_exposure_ev(eng, &img, &params, &ev);
     if (st != SPK_OK) { throw_status(env, st); return 0.0; }
     return static_cast<jdouble>(ev);
+} catch (const std::bad_alloc&) {
+    throw_native_oom(env);
+    return 0.0;
+} catch (const std::exception& e) {
+    throw_cpp_exception(env, e);
+    return 0.0;
 }
 
 /*
@@ -819,7 +875,7 @@ JNI(jdouble, nativeMeterExposureEv)(JNIEnv* env, jobject /*thiz*/, jlong handle,
  * learn the required buffer length, then to fill it.
  */
 JNI(jstring, nativeBakeCubeLut)(JNIEnv* env, jobject /*thiz*/, jlong handle,
-                                jobject paramsObj, jint size, jint shaper) {
+                                jobject paramsObj, jint size, jint shaper) try {
     spk_engine* eng = reinterpret_cast<spk_engine*>(handle);
     if (!eng) { throw_runtime(env, "spektra: engine handle is null"); return nullptr; }
 
@@ -846,4 +902,10 @@ JNI(jstring, nativeBakeCubeLut)(JNIEnv* env, jobject /*thiz*/, jlong handle,
                                       &needed);
     if (st != SPK_OK) { throw_status(env, st); return nullptr; }
     return env->NewStringUTF(buf.data());
+} catch (const std::bad_alloc&) {
+    throw_native_oom(env);
+    return nullptr;
+} catch (const std::exception& e) {
+    throw_cpp_exception(env, e);
+    return nullptr;
 }

@@ -1,6 +1,24 @@
 # Spektrafilm Android — Session Handoff
 
-## Current state (2026-08-27, export fast path part 1 — #120)
+## Current state (2026-08-27, export fast path part 2 — #121)
+
+- **#121 LANDED (this session): EXPORT_FASTPATH item 4 — the float64 full-res
+  intermediates are retired.** Allocation/lifetime work only; zero arithmetic change;
+  36/36 gates green; `test_simulate_e2e` scenario G extended to gate the direct path
+  (AE-on + spatial-on) byte-identical to the materialized path.
+  - Direct float32 filming for one-shot no-op-geometry renders: `PreprocessedInput`
+    (spektra.cpp) + `expose_f32_gain` (filming) + `measure_auto_exposure_ev_f32`
+    (autoexposure; also used by `spk_meter_exposure_ev`, whose 288 MB scratch is gone).
+  - Fused expose/scan passes when nothing intervenes; `raw`/`lin_rgb` exist only for
+    active effects, as uninitialized buffers. Free-at-last-use for `pin.rgb` (post-
+    expose) and `film_density_cmy` (post-print_expose); geometry passthrough moves.
+  - Measured 12 MP VmHWM: print 1.10 → **0.43 GB (−61%)**, scan 0.97 → **0.43 GB**;
+    grain-on print 1.55 → 1.28 GB (grain's own acc/layers buffers = future ticket).
+    Slightly faster too (cold scan 196.9 → 179.8 ms at 512²/4T).
+- Remaining fastpath ticket: **#122** (parallelize LUT apply + spatial filters).
+  Then the perf line waits on **#119** (device baseline, HITL).
+
+## Prior state (2026-08-27, export fast path part 1 — #120)
 
 - **Owner priority (standing): performance first.** No camera-feature work until the app is
   "super fast" (#123 closed DEFERRED; map #117 carries the note). The perf line is: #119

@@ -357,8 +357,15 @@ void crop_and_rescale(const double* in, int w, int h,
         return;
     }
 
-    // No rescale: emit the (possibly cropped) image as-is.
-    out->assign(cur, cur + static_cast<size_t>(cw) * ch * 3);
+    // No rescale: emit the (possibly cropped) image as-is. When the crop ran,
+    // `cropped` already holds exactly the output — move it instead of copying
+    // (identical bytes; at full resolution the copy briefly doubled residency,
+    // EXPORT_FASTPATH item 4).
+    if (params.crop) {
+        *out = std::move(cropped);
+    } else {
+        out->assign(cur, cur + static_cast<size_t>(cw) * ch * 3);
+    }
     *out_w = cw;
     *out_h = ch;
 }

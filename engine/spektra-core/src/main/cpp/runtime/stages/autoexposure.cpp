@@ -266,11 +266,22 @@ double measure_autoexposure_ev(const double* image, int w, int h,
     return ev;
 }
 
-void small_preview(const double* in, int w, int h, int max_size,
-                   std::vector<double>* out, int* out_w, int* out_h) {
+namespace {
+
+// Shared body for the float64 and float32 sources. Every pixel read goes
+// through static_cast<double>: an identity for T=double, and the EXACT
+// float->double widening for T=float — so the float32 path produces the same
+// preview doubles the float64 copy would have held, and the metered EV is
+// byte-identical (EXPORT_FASTPATH item 4: metering straight off the caller's
+// float32 frame instead of a full-resolution float64 copy).
+template <typename T>
+void small_preview_impl(const T* in, int w, int h, int max_size,
+                        std::vector<double>* out, int* out_w, int* out_h) {
     const int longest = std::max(w, h);
     if (longest <= max_size) {
-        out->assign(in, in + static_cast<size_t>(w) * h * 3);
+        const size_t n = static_cast<size_t>(w) * h * 3;
+        out->resize(n);
+        for (size_t i = 0; i < n; ++i) (*out)[i] = static_cast<double>(in[i]);
         *out_w = w;
         *out_h = h;
         return;
@@ -337,9 +348,9 @@ void small_preview(const double* in, int w, int h, int max_size,
                     const int sxx = mirror_index(static_cast<long long>(sx) + kx, w);
                     const double wx = ker_x[static_cast<size_t>(kx + rad_x)];
                     const size_t si = (static_cast<size_t>(syy) * w + sxx) * 3;
-                    in0 += wx * in[si + 0];
-                    in1 += wx * in[si + 1];
-                    in2 += wx * in[si + 2];
+                    in0 += wx * static_cast<double>(in[si + 0]);
+                    in1 += wx * static_cast<double>(in[si + 1]);
+                    in2 += wx * static_cast<double>(in[si + 2]);
                 }
                 const double wy = ker_y[static_cast<size_t>(ky + rad_y)];
                 acc0 += wy * in0;
@@ -356,6 +367,13 @@ void small_preview(const double* in, int w, int h, int max_size,
     *out_h = oh;
 }
 
+}  // namespace
+
+void small_preview(const double* in, int w, int h, int max_size,
+                   std::vector<double>* out, int* out_w, int* out_h) {
+    small_preview_impl(in, w, h, max_size, out, out_w, out_h);
+}
+
 double apply_auto_exposure(double* image, int w, int h, AeColorSpace cs,
                            bool apply_cctf_decoding, AeMethod method,
                            bool known_method, int preview_max_size) {
@@ -369,6 +387,17 @@ double apply_auto_exposure(double* image, int w, int h, AeColorSpace cs,
     const size_t n = static_cast<size_t>(w) * h * 3;
     for (size_t i = 0; i < n; ++i) image[i] *= gain;
     return ev;
+}
+
+double measure_auto_exposure_ev_f32(const float* image, int w, int h,
+                                    AeColorSpace cs, bool apply_cctf_decoding,
+                                    AeMethod method, bool known_method,
+                                    int preview_max_size) {
+    std::vector<double> prev;
+    int pw = 0, ph = 0;
+    small_preview_impl(image, w, h, preview_max_size, &prev, &pw, &ph);
+    return measure_autoexposure_ev(prev.data(), pw, ph, cs, apply_cctf_decoding,
+                                   method, known_method);
 }
 
 }  // namespace spk

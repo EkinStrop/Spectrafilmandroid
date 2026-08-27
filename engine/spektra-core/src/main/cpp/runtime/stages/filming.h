@@ -107,6 +107,17 @@ NdArray build_filming_tc_lut(const Profile& film, const NdArray& spectra_lut,
 void expose(const double* rgb, int width, int height, const FilmingParams& params,
             const NdArray& tc_lut, float* log_raw_out);
 
+// expose() reading the caller's FLOAT32 frame directly, with the auto-exposure
+// gain folded into each pixel load (EXPORT_FASTPATH item 4 — the direct path
+// used when geometry preprocessing is a no-op and no memo needs the float64
+// buffer). Value-identical to materializing float64 and calling expose():
+// float->double widening is exact and `* gain` is the same double multiply the
+// in-place auto-exposure scale performed, in the same order. Pass gain = 1.0
+// when auto-exposure is off.
+void expose_f32_gain(const float* rgb, double gain, int width, int height,
+                     const FilmingParams& params, const NdArray& tc_lut,
+                     float* log_raw_out);
+
 // develop(): log_raw (npix,3) -> density_cmy (npix,3). Normalises the profile's
 // density curves, interpolates, then applies the DIR-coupler correction. When
 // params.spatial_effects is true the coupler inhibitor correction is spatially

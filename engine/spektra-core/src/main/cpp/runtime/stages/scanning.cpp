@@ -89,12 +89,22 @@ void scan(const Profile& film, const ScanningParams& params,
     const int npix = width * height;
     const int S = film.n_samples;  // == kSpectralSamples (81) for bundled profiles
 
-    // Linear output-space RGB (pre-unsharp, pre-CAT02, pre-CCTF). Kept in float64
+    // Linear output-space RGB (pre-unsharp, pre-CAT02, pre-CCTF) stays float64
     // to match scanning.py, which carries the whole chain at NumPy double
-    // precision and only stores float32 at the very end.
+    // precision and only stores float32 at the very end. A full-resolution
+    // float64 plane is materialized ONLY when something operates on it between
+    // the per-pixel compute and the per-pixel encode (gamut compression, lens
+    // blur, unsharp — each gate below mirrors that op's own activation
+    // condition). Otherwise the two passes fuse per pixel — identical
+    // arithmetic on identical operands, byte-identical output — and the
+    // ~288 MB (12 MP) plane never exists (EXPORT_FASTPATH item 4).
     const bool do_unsharp =
         params.unsharp_sigma > 0.0 && params.unsharp_amount > 0.0;
-    std::vector<double> lin_rgb(static_cast<size_t>(npix) * 3);
+    const bool needs_lin_plane =
+        params.output_gamut_compress == OutputGamutCompress::kAcesRgc ||
+        params.output_gamut_compress == OutputGamutCompress::kOklch ||
+        params.output_gamut_compress == OutputGamutCompress::kOklrab ||
+        params.lens_blur > 0.0 || do_unsharp;
 
     // Scan illuminant + constants. For the scan_film route the scan illuminant is
     // the film's viewing illuminant (D50 here). These mirror scanning.py:
@@ -241,8 +251,10 @@ void scan(const Profile& film, const ScanningParams& params,
     // bit-for-bit we mirror that: spectral density, light, the XYZ integral, the
     // matrix product and the CCTF are all done in double; only the final write is
     // float32.
-    parallel_for(0, npix, [&](int lo, int hi) {
-    for (int p = lo; p < hi; ++p) {
+    //
+    // Per-pixel compute: density -> XYZ -> corrections -> linear output RGB into
+    // lin[3]. One body, shared verbatim by the fused and plane paths below.
+    auto compute_pixel = [&](int p, double* lin) {
         double xyz[3];
         if (params.use_lut) {
             // 1-4 replaced by the LUT-interpolated log_xyz (opt-in path). The
@@ -342,67 +354,12 @@ void scan(const Profile& film, const ScanningParams& params,
         //    from the D50 scan whitepoint to the space whitepoint baked into the
         //    matrix (colour.XYZ_to_RGB(..., illuminant=D50_xy)).
         const double* M = kXYZ_to_RGB[params.output_color_space];
-        double* lin = lin_rgb.data() + static_cast<size_t>(p) * 3;
         for (int c = 0; c < 3; ++c) {
             lin[c] = M[c * 3 + 0] * xyz[0] +
                      M[c * 3 + 1] * xyz[1] +
                      M[c * 3 + 2] * xyz[2];
         }
-    }
-    });
-
-    // OPT-IN output gamut compression, applied in the linear output space at the
-    // oracle's position (scanning.py::_density_to_rgb: right after XYZ->RGB and
-    // BEFORE blur/unsharp). Default kLegacyClip => skipped, so lin_rgb is untouched
-    // and every pre-existing golden stays byte-identical. kAcesRgc compresses
-    // out-of-cube chromaticities toward the achromatic axis with the ACES RGC v1.3
-    // per-channel knee (model/gamut_compression.cpp).
-    if (params.output_gamut_compress == OutputGamutCompress::kAcesRgc) {
-        compress_rgb_aces_rgc(lin_rgb.data(), npix, params.gamut_knee_threshold,
-                              params.gamut_knee_limit, params.gamut_knee_power);
-    } else if (params.output_gamut_compress == OutputGamutCompress::kOklch) {
-        // OkLch perceptual chroma reduction toward the output RGB cube. The
-        // spk_color_space enum (0..5) is exactly the golden's space_index, so the
-        // per-space RGB<->XYZ matrix + C_max table are selected by the raw index.
-        compress_rgb_oklch_chroma(lin_rgb.data(), npix,
-                                  static_cast<int>(params.output_color_space),
-                                  params.gamut_knee_threshold, params.gamut_knee_limit,
-                                  params.gamut_knee_power);
-    } else if (params.output_gamut_compress == OutputGamutCompress::kOklrab) {
-        // Same chroma reduction as kOklch, but the C_max lookup is indexed by
-        // Ottosson's rebased lightness Lr (model/gamut_compression.cpp) for a more
-        // perceptually uniform knee across light/dark. Same per-space selection.
-        compress_rgb_oklrab_chroma(lin_rgb.data(), npix,
-                                   static_cast<int>(params.output_color_space),
-                                   params.gamut_knee_threshold, params.gamut_knee_limit,
-                                   params.gamut_knee_power);
-    }
-
-    // Scanner lens blur (scanner.lens_blur, in pixels): a per-channel 2D Gaussian
-    // applied in the linear output space BEFORE the unsharp mask, matching
-    // scanning.py::_apply_blur_and_unsharp (apply_gaussian_blur then
-    // apply_unsharp_mask). apply_gaussian_blur gates on sigma > 0 and uses a scalar
-    // sigma broadcast across the 3 channels. Default lens_blur == 0 => skipped, so
-    // the existing goldens stay bit-exact.
-    if (params.lens_blur > 0.0) {
-        double sg[3] = {params.lens_blur, params.lens_blur, params.lens_blur};
-        gaussian_blur_per_channel_d(lin_rgb.data(), width, height, 3, sg);
-    }
-
-    // Scanner unsharp mask (spatial branch): rgb += amount * (rgb - G(sigma)*rgb),
-    // in the linear output space, after the lens blur and before the CAT02
-    // round-trip + CCTF. (apply_gaussian_blur / apply_unsharp_mask in
-    // model/diffusion.py.)
-    if (do_unsharp) {
-        const size_t total = static_cast<size_t>(npix) * 3;
-        std::vector<double> blur(lin_rgb);
-        double sg[3] = {params.unsharp_sigma, params.unsharp_sigma,
-                        params.unsharp_sigma};
-        gaussian_blur_per_channel_d(blur.data(), width, height, 3, sg);
-        const double amt = params.unsharp_amount;
-        for (size_t i = 0; i < total; ++i)
-            lin_rgb[i] = lin_rgb[i] + amt * (lin_rgb[i] - blur[i]);
-    }
+    };
 
     // 6. CCTF encode + clip per pixel (scanning._apply_cctf_encoding_and_clip).
     //    When output_cctf_encoding is on, colour.RGB_to_RGB(cs, cs, "CAT02")
@@ -412,9 +369,7 @@ void scan(const Profile& film, const ScanningParams& params,
     //    excursions where the gamma encode yields NaN for negative linear RGB.
     const double* Mc = kRGB_to_RGB_CCTF[params.output_color_space];
     const spk_color_space cs = params.output_color_space;
-    parallel_for(0, npix, [&](int lo, int hi) {
-    for (int p = lo; p < hi; ++p) {
-        const double* lin = lin_rgb.data() + static_cast<size_t>(p) * 3;
+    auto encode_pixel = [&](int p, const double* lin) {
         float* out = rgb_out + static_cast<size_t>(p) * 3;
         for (int c = 0; c < 3; ++c) {
             double v;
@@ -433,7 +388,92 @@ void scan(const Profile& film, const ScanningParams& params,
             // default; NaN passes through). Applied per channel, in [0,1].
             out[c] = params.tone_curve.apply(c, static_cast<float>(v));
         }
+    };
+
+    // Fused path: nothing operates between compute and encode, so each pixel
+    // goes straight through — same ops, same operands, byte-identical output —
+    // and the full-resolution float64 plane never exists.
+    if (!needs_lin_plane) {
+        parallel_for(0, npix, [&](int lo, int hi) {
+            for (int p = lo; p < hi; ++p) {
+                double lin[3];
+                compute_pixel(p, lin);
+                encode_pixel(p, lin);
+            }
+        });
+        return;
     }
+
+    // Plane path: materialize lin_rgb for the ops below. Allocated
+    // UNINITIALIZED — compute_pixel writes every element before anything reads
+    // it, so the old vector value-initialization only cost a ~288 MB memset
+    // at 12 MP (EXPORT_FASTPATH item 4).
+    std::unique_ptr<double[]> lin_buf(
+        new double[static_cast<size_t>(npix) * 3]);
+    double* const lin_rgb = lin_buf.get();
+    parallel_for(0, npix, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p)
+            compute_pixel(p, lin_rgb + static_cast<size_t>(p) * 3);
+    });
+
+    // OPT-IN output gamut compression, applied in the linear output space at the
+    // oracle's position (scanning.py::_density_to_rgb: right after XYZ->RGB and
+    // BEFORE blur/unsharp). Default kLegacyClip => skipped, so lin_rgb is untouched
+    // and every pre-existing golden stays byte-identical. kAcesRgc compresses
+    // out-of-cube chromaticities toward the achromatic axis with the ACES RGC v1.3
+    // per-channel knee (model/gamut_compression.cpp).
+    if (params.output_gamut_compress == OutputGamutCompress::kAcesRgc) {
+        compress_rgb_aces_rgc(lin_rgb, npix, params.gamut_knee_threshold,
+                              params.gamut_knee_limit, params.gamut_knee_power);
+    } else if (params.output_gamut_compress == OutputGamutCompress::kOklch) {
+        // OkLch perceptual chroma reduction toward the output RGB cube. The
+        // spk_color_space enum (0..5) is exactly the golden's space_index, so the
+        // per-space RGB<->XYZ matrix + C_max table are selected by the raw index.
+        compress_rgb_oklch_chroma(lin_rgb, npix,
+                                  static_cast<int>(params.output_color_space),
+                                  params.gamut_knee_threshold, params.gamut_knee_limit,
+                                  params.gamut_knee_power);
+    } else if (params.output_gamut_compress == OutputGamutCompress::kOklrab) {
+        // Same chroma reduction as kOklch, but the C_max lookup is indexed by
+        // Ottosson's rebased lightness Lr (model/gamut_compression.cpp) for a more
+        // perceptually uniform knee across light/dark. Same per-space selection.
+        compress_rgb_oklrab_chroma(lin_rgb, npix,
+                                   static_cast<int>(params.output_color_space),
+                                   params.gamut_knee_threshold, params.gamut_knee_limit,
+                                   params.gamut_knee_power);
+    }
+
+    // Scanner lens blur (scanner.lens_blur, in pixels): a per-channel 2D Gaussian
+    // applied in the linear output space BEFORE the unsharp mask, matching
+    // scanning.py::_apply_blur_and_unsharp (apply_gaussian_blur then
+    // apply_unsharp_mask). apply_gaussian_blur gates on sigma > 0 and uses a scalar
+    // sigma broadcast across the 3 channels. Default lens_blur == 0 => skipped, so
+    // the existing goldens stay bit-exact.
+    if (params.lens_blur > 0.0) {
+        double sg[3] = {params.lens_blur, params.lens_blur, params.lens_blur};
+        gaussian_blur_per_channel_d(lin_rgb, width, height, 3, sg);
+    }
+
+    // Scanner unsharp mask (spatial branch): rgb += amount * (rgb - G(sigma)*rgb),
+    // in the linear output space, after the lens blur and before the CAT02
+    // round-trip + CCTF. (apply_gaussian_blur / apply_unsharp_mask in
+    // model/diffusion.py.)
+    if (do_unsharp) {
+        const size_t total = static_cast<size_t>(npix) * 3;
+        std::vector<double> blur(lin_rgb, lin_rgb + total);
+        double sg[3] = {params.unsharp_sigma, params.unsharp_sigma,
+                        params.unsharp_sigma};
+        gaussian_blur_per_channel_d(blur.data(), width, height, 3, sg);
+        const double amt = params.unsharp_amount;
+        for (size_t i = 0; i < total; ++i)
+            lin_rgb[i] = lin_rgb[i] + amt * (lin_rgb[i] - blur[i]);
+    }
+
+    // Encode the (compressed/blurred/sharpened) plane — the same encode_pixel
+    // the fused path runs, on the same values.
+    parallel_for(0, npix, [&](int lo, int hi) {
+        for (int p = lo; p < hi; ++p)
+            encode_pixel(p, lin_rgb + static_cast<size_t>(p) * 3);
     });
 }
 

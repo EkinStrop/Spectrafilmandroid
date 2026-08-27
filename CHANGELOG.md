@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Export fast path, part 2 — retire the full-res float64 intermediates (#121)
+
+A 12 MP export used to allocate and zero-touch ~900 MB of full-resolution
+float64 intermediates (`src`, `rgb`, filming `raw`, scanning `lin_rgb`) before
+doing useful work — peaking at ~1.1 GB, inside lmkd-kill territory on 4 GB
+devices. This is allocation/lifetime work only: float64 stays wherever the
+parity contract computes in float64, no arithmetic changed, and every output
+is byte-identical (36-gate suite green; `test_simulate_e2e` scenario G now
+also gates the direct path vs the materialized path, AE-on and spatial-on
+included).
+
+- **Direct float32 filming** on one-shot renders with no-op geometry (export,
+  magnifier): filming reads the caller's float32 frame through
+  `expose_f32_gain` with the auto-exposure gain folded into each pixel load,
+  and AE meters the float32 frame directly (`measure_auto_exposure_ev_f32`) —
+  the ~288 MB float64 image never exists. Byte-identical by construction
+  (float→double widening is exact; the gain multiply is the same double op in
+  the same order). `spk_meter_exposure_ev` drops its full-res float64 scratch
+  the same way.
+- **Fused per-pixel passes**: `expose` and `scan` fuse their compute and
+  encode loops whenever no spatial/pointwise op runs between them (every gate
+  mirrors that op's own activation condition), so the ~288 MB `raw` and
+  `lin_rgb` planes exist only when an active effect actually needs them — and
+  then as uninitialized buffers instead of zero-filled vectors.
+- **Free-at-last-use**: the float64 image is released right after `expose`,
+  the film density right after `print_expose`; the geometry passthrough moves
+  instead of copying; stage float32 buffers allocate only when their path
+  runs.
+
+**Measured** (12 MP host render, `VmHWM`): print route **1.10 GB → 0.43 GB
+(−61%)**, scan route **0.97 GB → 0.43 GB (−55%)** — render transients over
+the process baseline drop ~840 MB → ~140 MB; grain-on print 1.55 → 1.28 GB
+(grain's own buffers are a separate, future item). No speed cost — the killed
+memsets and fused loops make it slightly faster (cold scan 196.9 → 179.8 ms,
+cold print 336.2 → 329.5 ms at 512², 4 threads).
+
 ### Export fast path, part 1 — EXPORT_FASTPATH items 1+2 (#120)
 
 Bit-exact speed work; every default render path stays byte-identical (36-gate

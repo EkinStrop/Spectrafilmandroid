@@ -830,13 +830,63 @@ spk::CropResizeParams build_crop_resize(const spk_params* p) {
 // `pixel_size_um` is computed here as film_format_mm*1000/max(h,w) on the
 // ORIGINAL geometry (matching ResizingService, which sets it from the incoming
 // shape before crop) and then divided by upscale_factor when a rescale runs.
+// Result of the geometry preprocess, handed to the filming stage. Two forms:
+//   - materialized: `rgb` holds the float64 image (crop/rescale ran, or the
+//     film-density memo is active and its key must hash the buffer bytes);
+//   - direct: `direct` is set and filming reads the caller's FLOAT32 pixels
+//     through expose_f32_gain with `gain` (= 2^ae_ev, 1.0 when AE is off)
+//     folded into each load. Value-identical to materializing: float->double
+//     widening is exact and the gain multiply is the same double op
+//     apply_auto_exposure performed in place, in the same order — gated by
+//     test_simulate_e2e scenario G (flag-on vs flag-off byte identity).
+// The direct form skips the ~288 MB (12 MP) float64 image entirely
+// (EXPORT_FASTPATH item 4); it engages only for one-shot renders
+// (disable_buffer_memos, where no memo key ever needs the bytes) with no-op
+// geometry (crop off, upscale 1.0 — anything else must materialize to run the
+// crop/rescale math).
+struct PreprocessedInput {
+    std::vector<double> rgb;  // materialized float64 image (empty when direct)
+    bool direct = false;
+    double gain = 1.0;
+};
+
 void preprocess_geometry(const spk_image* in, const spk_params* p,
-                         std::vector<double>* rgb, int* width, int* height,
+                         PreprocessedInput* out, int* width, int* height,
                          double* pixel_size_um) {
     const int w = in->width, h = in->height;
     const double fmm = p->film_format_mm > 0.0f ? p->film_format_mm : 35.0;
     const int longest = w > h ? w : h;
     *pixel_size_um = fmm * 1000.0 / static_cast<double>(longest);
+
+    // Method resolution shared by both forms (NULL => schema default).
+    spk::AeMethod method = spk::AeMethod::kCenterWeighted;
+    bool known = true;
+    if (p->auto_exposure != 0 && p->auto_exposure_method != nullptr) {
+        known = spk::ae_method_from_string(p->auto_exposure_method, &method);
+    }
+
+    // upscale 0 normalizes to 1.0 in build_crop_resize, so both values mean
+    // "no rescale" — keep this gate aligned with that mapping.
+    const bool geometry_noop =
+        (p->crop == 0) &&
+        (p->upscale_factor == 1.0f || p->upscale_factor == 0.0f);
+    if (geometry_noop && p->disable_buffer_memos != 0) {
+        // Direct form: meter straight off the float32 frame (byte-identical EV —
+        // see measure_auto_exposure_ev_f32) and let filming fold the gain into
+        // each pixel load. No float64 image is ever built.
+        out->direct = true;
+        out->gain = 1.0;
+        if (p->auto_exposure != 0) {
+            const double ev = spk::measure_auto_exposure_ev_f32(
+                in->data, w, h, spk::AeColorSpace::kProPhotoRGB,
+                /*apply_cctf_decoding=*/p->input_cctf_decoding != 0, method,
+                known);
+            out->gain = std::pow(2.0, ev);
+        }
+        *width = w;
+        *height = h;
+        return;  // pixel_size_um unchanged: no rescale ran
+    }
 
     std::vector<double> src(static_cast<size_t>(w) * h * 3);
     for (size_t i = 0; i < src.size(); ++i)
@@ -845,19 +895,23 @@ void preprocess_geometry(const spk_image* in, const spk_params* p,
     // Auto-exposure (pipeline._preprocess -> FilmingStage.auto_exposure). Runs on
     // the original geometry, BEFORE crop_and_rescale. No-op when off.
     if (p->auto_exposure != 0) {
-        spk::AeMethod method = spk::AeMethod::kCenterWeighted;
-        const bool known = p->auto_exposure_method == nullptr
-                               ? true  // NULL => schema default center_weighted
-                               : spk::ae_method_from_string(
-                                     p->auto_exposure_method, &method);
         spk::apply_auto_exposure(src.data(), w, h,
                                  spk::AeColorSpace::kProPhotoRGB,
                                  /*apply_cctf_decoding=*/p->input_cctf_decoding != 0,
                                  method, known);
     }
 
+    if (geometry_noop) {
+        // crop_and_rescale would be a pure copy here — move instead (identical
+        // bytes; the copy briefly doubled full-res float64 residency,
+        // EXPORT_FASTPATH item 4).
+        out->rgb = std::move(src);
+        *width = w;
+        *height = h;
+        return;
+    }
     spk::CropResizeParams cr = build_crop_resize(p);
-    spk::crop_and_rescale(src.data(), w, h, cr, rgb, width, height,
+    spk::crop_and_rescale(src.data(), w, h, cr, &out->rgb, width, height,
                           pixel_size_um);
 }
 
@@ -875,10 +929,12 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     // 0) Geometry preprocess (pipeline._preprocess -> crop_and_rescale). Runs
     //    BEFORE filming, mirroring Python ordering. Default params (crop off,
     //    upscale 1.0) leave the image, geometry and pixel_size_um unchanged.
-    std::vector<double> rgb;
+    //    One-shot renders with no-op geometry come back in the DIRECT form
+    //    (filming reads the caller's float32 frame; see PreprocessedInput).
+    PreprocessedInput pin;
     int width = 0, height = 0;
     double resize_pixel_size_um = 0.0;
-    preprocess_geometry(in, p, &rgb, &width, &height, &resize_pixel_size_um);
+    preprocess_geometry(in, p, &pin, &width, &height, &resize_pixel_size_um);
     const int npix = width * height;
     if (out_w) *out_w = width;
     if (out_h) *out_h = height;
@@ -1002,7 +1058,11 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     // bw_exposure_correction (applied to raw inside expose), so spatial-ON
     // renders memoize and a downstream-only edit (scanner/output/tone-curve)
     // skips filming entirely. Taps + grain bypass.
-    std::vector<float> density_cmy(static_cast<size_t>(npix) * 3);
+    // Allocated when a path needs it (memo hit copy-assigns; the miss path
+    // resizes right before develop, AFTER expose's transients are gone —
+    // EXPORT_FASTPATH item 4 keeps it out of the filming peak).
+    std::vector<float> density_cmy;
+    const size_t out_elems = static_cast<size_t>(npix) * 3;
     const bool scan_tap_bypass =
         (tap_log_raw != nullptr) || (tap_density_cmy != nullptr);
     // Also skipped for one-shot renders (disable_buffer_memos, EXPORT_FASTPATH
@@ -1013,17 +1073,19 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     bool scan_film_cache_hit = false;
     // Computed ONCE per render (EXPORT_FASTPATH item 2): the key hashes the
     // whole float64 rgb buffer, so the old check-then-store recompute paid
-    // that full-buffer hash twice on every miss.
+    // that full-buffer hash twice on every miss. Only reachable in the
+    // materialized form: use_scan_film_cache requires disable_buffer_memos==0
+    // and the direct form requires it != 0, so pin.rgb is always valid here.
     uint64_t scan_film_key = 0;
     if (use_scan_film_cache) {
         scan_film_key = compute_film_cache_key(
-            rgb, width, height, in->color_space, p, resize_pixel_size_um,
+            pin.rgb, width, height, in->color_space, p, resize_pixel_size_um,
             fparams.bw_exposure_correction);
         std::lock_guard<std::mutex> g(eng->film_cache_mutex);
         auto& slot = eng->film_memo[spk_engine::kMemoScan];
         if (slot.valid && slot.key == scan_film_key &&
             slot.entry.width == width && slot.entry.height == height &&
-            slot.entry.film_density_cmy.size() == density_cmy.size()) {
+            slot.entry.film_density_cmy.size() == out_elems) {
             // HIT: copy the cached buffer out BY VALUE while holding the lock.
             density_cmy = slot.entry.film_density_cmy;
             ++slot.hits;
@@ -1033,11 +1095,23 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     }
 
     if (!scan_film_cache_hit) {
-        std::vector<float> log_raw(static_cast<size_t>(npix) * 3);
-        spk::expose(rgb.data(), width, height, fparams, tc_lut, log_raw.data());
+        std::vector<float> log_raw(out_elems);
+        if (pin.direct) {
+            spk::expose_f32_gain(in->data, pin.gain, width, height, fparams,
+                                 tc_lut, log_raw.data());
+        } else {
+            spk::expose(pin.rgb.data(), width, height, fparams, tc_lut,
+                        log_raw.data());
+        }
         if (tap_log_raw) *tap_log_raw = log_raw;
 
+        // The float64 image is dead past expose — at 12 MP this releases
+        // ~288 MB before develop/scan run (EXPORT_FASTPATH item 4). The memo
+        // key was computed above; taps never read it.
+        { std::vector<double>().swap(pin.rgb); }
+
         // 5) develop(): log_raw -> density_cmy (+ DIR couplers, spatial diffusion if on).
+        density_cmy.resize(out_elems);
         spk::develop(log_raw.data(), width, height, film, fparams, density_cmy.data());
         if (use_scan_film_cache) {
             std::lock_guard<std::mutex> g(eng->film_cache_mutex);
@@ -1049,6 +1123,8 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
             slot.valid = true;
             ++slot.misses;
         }
+    } else {
+        { std::vector<double>().swap(pin.rgb); }
     }
     if (tap_density_cmy) *tap_density_cmy = density_cmy;
 
@@ -1112,11 +1188,13 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     // 0) Geometry preprocess (crop_and_rescale) BEFORE filming, mirroring the
     //    Python pipeline._preprocess. Default params -> passthrough. The print
     //    route runs spatial/grain off, so pixel_size_um is not consumed here;
-    //    only the geometry (width/height) can change.
-    std::vector<double> rgb;
+    //    only the geometry (width/height) can change. One-shot renders with
+    //    no-op geometry come back in the DIRECT form (filming reads the
+    //    caller's float32 frame; see PreprocessedInput).
+    PreprocessedInput pin;
     int width = 0, height = 0;
     double resize_pixel_size_um = 0.0;
-    preprocess_geometry(in, p, &rgb, &width, &height, &resize_pixel_size_um);
+    preprocess_geometry(in, p, &pin, &width, &height, &resize_pixel_size_um);
     const int npix = width * height;
     if (out_w) *out_w = width;
     if (out_h) *out_h = height;
@@ -1356,7 +1434,8 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     fparams.halation.boost_range = p->halation_boost_range;
     fparams.halation.protect_ev = p->halation_protect_ev;
 
-    // `rgb` (float64, crop/rescale applied) built by preprocess_geometry above.
+    // `pin` (the preprocessed input — materialized float64 or the direct
+    // float32 form) was built by preprocess_geometry above.
 
     // Print-route film_density_cmy memo. With grain off, expose()+develop() is a
     // PURE deterministic function of (rgb, width, height, color_space, filming
@@ -1372,7 +1451,11 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     //   (c) the caller opted out for a one-shot render (disable_buffer_memos,
     //       EXPORT_FASTPATH item 2): no key hash, no lookup, no store — and the
     //       warm slot stays intact.
-    std::vector<float> film_density_cmy(static_cast<size_t>(npix) * 3);
+    // Allocated when a path needs it (memo hit copy-assigns; the miss path
+    // resizes right before develop, AFTER expose's transients are gone —
+    // EXPORT_FASTPATH item 4 keeps it out of the filming peak).
+    std::vector<float> film_density_cmy;
+    const size_t out_elems = static_cast<size_t>(npix) * 3;
     const bool tap_bypass = (tap_log_raw != nullptr) || (tap_film_density_cmy != nullptr);
     const bool use_film_cache =
         !tap_bypass && !print_stochastic && p->disable_buffer_memos == 0;
@@ -1380,10 +1463,12 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     bool film_cache_hit = false;
     // Computed ONCE per render (EXPORT_FASTPATH item 2): the key hashes the
     // whole float64 rgb buffer, so the old check-then-store recompute paid
-    // that full-buffer hash twice on every miss.
+    // that full-buffer hash twice on every miss. Only reachable in the
+    // materialized form: use_film_cache requires disable_buffer_memos==0 and
+    // the direct form requires it != 0, so pin.rgb is always valid here.
     uint64_t film_key = 0;
     if (use_film_cache) {
-        film_key = compute_film_cache_key(rgb, width, height,
+        film_key = compute_film_cache_key(pin.rgb, width, height,
                                           in->color_space, p,
                                           resize_pixel_size_um,
                                           /*bw_exposure_correction=*/1.0);
@@ -1391,7 +1476,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         auto& slot = eng->film_memo[spk_engine::kMemoPrint];
         if (slot.valid && slot.key == film_key &&
             slot.entry.width == width && slot.entry.height == height &&
-            slot.entry.film_density_cmy.size() == film_density_cmy.size()) {
+            slot.entry.film_density_cmy.size() == out_elems) {
             // HIT: copy the cached buffer out BY VALUE while holding the lock.
             film_density_cmy = slot.entry.film_density_cmy;
             ++slot.hits;
@@ -1401,9 +1486,22 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     }
 
     if (!film_cache_hit) {
-        std::vector<float> film_log_raw(static_cast<size_t>(npix) * 3);
-        spk::expose(rgb.data(), width, height, fparams, tc_lut, film_log_raw.data());
+        std::vector<float> film_log_raw(out_elems);
+        if (pin.direct) {
+            spk::expose_f32_gain(in->data, pin.gain, width, height, fparams,
+                                 tc_lut, film_log_raw.data());
+        } else {
+            spk::expose(pin.rgb.data(), width, height, fparams, tc_lut,
+                        film_log_raw.data());
+        }
         if (tap_log_raw) *tap_log_raw = film_log_raw;
+
+        // The float64 image is dead past expose — at 12 MP this releases
+        // ~288 MB before develop/printing/scan run (EXPORT_FASTPATH item 4).
+        // The memo key was computed above; taps never read it.
+        { std::vector<double>().swap(pin.rgb); }
+
+        film_density_cmy.resize(out_elems);
         spk::develop(film_log_raw.data(), width, height, film, fparams,
                      film_density_cmy.data());
         if (use_film_cache) {
@@ -1417,6 +1515,8 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
             slot.valid = true;
             ++slot.misses;
         }
+    } else {
+        { std::vector<double>().swap(pin.rgb); }
     }
     if (tap_film_density_cmy) *tap_film_density_cmy = film_density_cmy;
 
@@ -1425,7 +1525,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     //    compute_print_density_key). An output-only edit (scanner/output space/
     //    tone curve/glare) therefore reruns scan() alone. Debug-tap renders
     //    bypass, keeping the tap path byte-identical to a plain recompute.
-    std::vector<float> print_density_cmy(static_cast<size_t>(npix) * 3);
+    std::vector<float> print_density_cmy;  // allocated by the path that fills it
     // Bypassed for tap renders AND for one-shot renders (disable_buffer_memos,
     // EXPORT_FASTPATH item 2 — the key hashes the whole float32 film buffer).
     const bool pd_bypass = tap_bypass || (tap_print_density_cmy != nullptr) ||
@@ -1441,16 +1541,22 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         auto& slot = eng->print_density_memo;
         if (slot.valid && slot.key == pd_key &&
             slot.entry.width == width && slot.entry.height == height &&
-            slot.entry.film_density_cmy.size() == print_density_cmy.size()) {
+            slot.entry.film_density_cmy.size() == out_elems) {
             print_density_cmy = slot.entry.film_density_cmy;  // holds print density
             ++slot.hits;
             pd_hit = true;
         }
     }
     if (!pd_hit) {
-        std::vector<float> print_log_raw(static_cast<size_t>(npix) * 3);
+        std::vector<float> print_log_raw(out_elems);
         spk::print_expose(film, prnt, pparams, film_density_cmy.data(), width, height,
                           print_log_raw.data());
+        // film_density_cmy's last read was print_expose (the tap copy was taken
+        // above; the memo store below uses pd_key only) — at 12 MP this
+        // releases ~144 MB before print_develop/scan run (EXPORT_FASTPATH
+        // item 4).
+        { std::vector<float>().swap(film_density_cmy); }
+        print_density_cmy.resize(out_elems);
         spk::print_develop(prnt, pparams, print_log_raw.data(), npix,
                            print_density_cmy.data());
         if (!pd_bypass) {
@@ -1463,6 +1569,8 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
             slot.valid = true;
             ++slot.misses;
         }
+    } else {
+        { std::vector<float>().swap(film_density_cmy); }
     }
     if (tap_print_density_cmy) *tap_print_density_cmy = print_density_cmy;
 
@@ -1956,9 +2064,6 @@ spk_status spk_meter_exposure_ev(spk_engine* eng, const spk_image* in,
     if (p->auto_exposure == 0) return SPK_OK;
 
     const int w = in->width, h = in->height;
-    std::vector<double> src(static_cast<size_t>(w) * h * 3);
-    for (size_t i = 0; i < src.size(); ++i)
-        src[i] = static_cast<double>(in->data[i]);
 
     // Method resolution is character-for-character the same as preprocess_geometry's
     // (NULL => the schema default center_weighted; an unrecognised string is passed
@@ -1969,16 +2074,15 @@ spk_status spk_meter_exposure_ev(spk_engine* eng, const spk_image* in,
                            : spk::ae_method_from_string(p->auto_exposure_method,
                                                         &method);
 
-    // Reuse apply_auto_exposure VERBATIM on a scratch copy (whose scaled pixels we
-    // then discard) rather than re-deriving the metering here. It already returns
-    // the EV it applied, so this value cannot drift from what the render actually
-    // uses — which is the entire point of exposing it. The wasted scaling pass is
-    // O(npix) on a copy the caller never sees, negligible against the metering's
-    // own small_preview + luminance integral.
-    *out_ev = spk::apply_auto_exposure(src.data(), w, h,
-                                       spk::AeColorSpace::kProPhotoRGB,
-                                       /*apply_cctf_decoding=*/p->input_cctf_decoding != 0,
-                                       method, known);
+    // Meter straight off the caller's float32 frame — byte-identical EV to
+    // apply_auto_exposure on a float64 copy (float->double widening is exact;
+    // see measure_auto_exposure_ev_f32), without the full-resolution float64
+    // scratch this entry point used to allocate (~288 MB at 12 MP,
+    // EXPORT_FASTPATH item 4). Still the same metering code the render path
+    // runs, so the value cannot drift from what the render actually uses.
+    *out_ev = spk::measure_auto_exposure_ev_f32(
+        in->data, w, h, spk::AeColorSpace::kProPhotoRGB,
+        /*apply_cctf_decoding=*/p->input_cctf_decoding != 0, method, known);
     return SPK_OK;
 }
 

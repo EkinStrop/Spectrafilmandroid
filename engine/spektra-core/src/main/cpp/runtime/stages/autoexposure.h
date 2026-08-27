@@ -102,6 +102,17 @@ double apply_auto_exposure(double* image, int w, int h, AeColorSpace cs,
                            bool apply_cctf_decoding, AeMethod method,
                            bool known_method, int preview_max_size = 256);
 
+// Metering-only variant reading the caller's FLOAT32 frame directly — no
+// full-resolution float64 copy (EXPORT_FASTPATH item 4). Byte-identical EV to
+// apply_auto_exposure on a float64 copy of the same frame: every pixel read
+// widens float->double exactly, so the small_preview doubles — and everything
+// metered from them — are the same values. The caller applies 2**ev itself
+// (the direct filming path folds it into the per-pixel load).
+double measure_auto_exposure_ev_f32(const float* image, int w, int h,
+                                    AeColorSpace cs, bool apply_cctf_decoding,
+                                    AeMethod method, bool known_method,
+                                    int preview_max_size = 256);
+
 }  // namespace spk
 
 #endif  // SPK_RUNTIME_STAGES_AUTOEXPOSURE_H

@@ -726,13 +726,60 @@ int main(int argc, char** argv) {
                                sh1 == spk_test_scan_film_cache_hits(eng) &&
                                sm1 == spk_test_scan_film_cache_misses(eng);
 
-            bool g_ok = same && frozen && warm_kept && scan_frozen;
+            // -- Direct float32 filming (EXPORT_FASTPATH item 4): with the flag
+            // set and no-op geometry, filming reads the caller's float32 frame
+            // (expose_f32_gain) and auto-exposure meters it directly — both
+            // must be byte-identical to the materialized float64 path. Cover
+            // AE-on (float32 metering + per-pixel gain fold, fused expose) and
+            // a spatial effect (halation ON — expose materializes `raw` but
+            // still loads float32 pixels).
+            bool direct_ae_ok = false, direct_spatial_ok = false;
+            {
+                spk_params pae = make_p0();
+                pae.auto_exposure = 1;  // center_weighted (NULL method)
+                spk_image mref{};
+                bool okm =
+                    spk_simulate(eng, &in_img, &pae, &mref) == SPK_OK && mref.data;
+                spk_params pad = pae;
+                pad.disable_buffer_memos = 1;
+                spk_image mdir{};
+                bool okd =
+                    spk_simulate(eng, &in_img, &pad, &mdir) == SPK_OK && mdir.data;
+                direct_ae_ok = okm && okd &&
+                               std::memcmp(mref.data, mdir.data,
+                                           n * sizeof(float)) == 0;
+                if (mref.data) spk_image_free(&mref);
+                if (mdir.data) spk_image_free(&mdir);
+            }
+            {
+                spk_params psp = make_p0();
+                psp.halation_active = 1;
+                spk_image sref{};
+                bool okm =
+                    spk_simulate(eng, &in_img, &psp, &sref) == SPK_OK && sref.data;
+                spk_params psd = psp;
+                psd.disable_buffer_memos = 1;
+                spk_image sdir{};
+                bool okd =
+                    spk_simulate(eng, &in_img, &psd, &sdir) == SPK_OK && sdir.data;
+                direct_spatial_ok = okm && okd &&
+                                    std::memcmp(sref.data, sdir.data,
+                                                n * sizeof(float)) == 0;
+                if (sref.data) spk_image_free(&sref);
+                if (sdir.data) spk_image_free(&sdir);
+            }
+
+            bool g_ok = same && frozen && warm_kept && scan_frozen &&
+                        direct_ae_ok && direct_spatial_ok;
             std::printf("[film_cache G: disable_buffer_memos opt-out] pixels %s, "
-                        "counters %s, warm slots %s, scan route %s -> %s\n",
+                        "counters %s, warm slots %s, scan route %s, direct-AE %s, "
+                        "direct-spatial %s -> %s\n",
                         same ? "identical" : "DIFFER",
                         frozen ? "frozen" : "MOVED",
                         warm_kept ? "kept" : "LOST",
                         scan_frozen ? "frozen" : "MOVED",
+                        direct_ae_ok ? "identical" : "DIFFER",
+                        direct_spatial_ok ? "identical" : "DIFFER",
                         g_ok ? "PASS" : "FAIL");
             pass_film_cache = pass_film_cache && g_ok;
         }

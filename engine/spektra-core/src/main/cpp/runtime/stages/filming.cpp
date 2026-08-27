@@ -13,6 +13,7 @@
 #include "runtime/stages/filming.h"
 
 #include <cmath>
+#include <memory>
 #include <vector>
 
 #include "kernels/exponential_filter.h"
@@ -415,21 +416,88 @@ NdArray build_filming_tc_lut(const Profile& film, const NdArray& spectra_lut_in,
     return tc_lut;
 }
 
-void expose(const double* rgb, int width, int height, const FilmingParams& params,
-            const NdArray& tc_lut, float* log_raw_out) {
+namespace {
+
+// Pixel sources for expose(). Each returns the float64 RGB triple for pixel p.
+//   - SrcF64: the materialized float64 image (the historical path).
+//   - SrcF32Gain: the caller's float32 frame with the auto-exposure gain folded
+//     into the load. Value-identical to materializing: float->double widening
+//     is exact and `* gain` is the same double multiply apply_auto_exposure
+//     performed in place, in the same order (EXPORT_FASTPATH item 4 — a 12 MP
+//     export no longer materializes the ~288 MB float64 input at all).
+struct SrcF64 {
+    const double* rgb;
+    inline void load(int p, double out[3]) const {
+        out[0] = rgb[p * 3 + 0];
+        out[1] = rgb[p * 3 + 1];
+        out[2] = rgb[p * 3 + 2];
+    }
+};
+struct SrcF32Gain {
+    const float* rgb;
+    double gain;
+    inline void load(int p, double out[3]) const {
+        out[0] = static_cast<double>(rgb[p * 3 + 0]) * gain;
+        out[1] = static_cast<double>(rgb[p * 3 + 1]) * gain;
+        out[2] = static_cast<double>(rgb[p * 3 + 2]) * gain;
+    }
+};
+
+template <typename Src>
+void expose_impl(const Src& src, int width, int height,
+                 const FilmingParams& params, const NdArray& tc_lut,
+                 float* log_raw_out) {
     const int npix = width * height;
     int L = tc_lut.shape[0];
     double scale = static_cast<double>(L - 1);
     double exp_mult = std::pow(2.0, params.exposure_compensation_ev);  // 1.0 under goldens
 
+    // When every effect between the irradiance computation and the log10 is
+    // inert — each gate below mirrors that effect's own self-gate exactly —
+    // the two passes fuse: per pixel, raw is a local and goes straight through
+    // the log10 into the float32 output. Identical arithmetic on identical
+    // operands (the ops between the passes were no-ops), so the output is
+    // byte-identical; and no full-resolution float64 `raw` exists at all
+    // (~288 MB at 12 MP, EXPORT_FASTPATH item 4). Any active effect takes the
+    // materialized path below, unchanged.
+    const bool pointwise_fused =
+        !(params.halation.boost_ev > 0.0) &&        // apply_highlight_boost gate
+        !params.diffusion_filter.active &&           // diffusion filter gate
+        !(params.lens_blur_um > 0.0 && params.pixel_size_um > 0.0 &&
+          params.lens_blur_um / params.pixel_size_um > 0.0) &&  // lens blur gate
+        !params.halation.active &&                   // halation gate
+        params.bw_exposure_correction == 1.0;        // b/w correction gate
+    if (pointwise_fused) {
+        parallel_for(0, npix, [&](int lo, int hi) {
+            for (int p = lo; p < hi; ++p) {
+                double in[3];
+                src.load(p, in);
+                Vec2 tc;
+                double b;
+                prophoto_rgb_to_tc_b(in, &tc, &b);
+                double rr[3];
+                cubic_interp_lut_at_2d(tc_lut, tc.x * scale, tc.y * scale, rr);
+                for (int c = 0; c < 3; ++c) {
+                    double rawv = rr[c] * b * exp_mult;
+                    log_raw_out[p * 3 + c] = static_cast<float>(
+                        std::log10(std::fmax(rawv, 0.0) + 1e-10));
+                }
+            }
+        });
+        return;
+    }
+
     // Compute the float64 pre-log irradiance `raw` for every pixel.
     // raw = rgb_to_raw_hanatos2025(rgb) * brightness * 2^exposure_comp_ev.
-    // (diffusion_filter/lens_blur off; black/white exposure correction == 1.0 under
-    //  the goldens.)
-    std::vector<double> raw(static_cast<size_t>(npix) * 3);
+    // Allocated UNINITIALIZED (not a zero-filled vector): the loop below writes
+    // every element before anything reads it, so the old value-initialization
+    // only cost a ~288 MB memset at 12 MP (EXPORT_FASTPATH item 4).
+    std::unique_ptr<double[]> raw_buf(new double[static_cast<size_t>(npix) * 3]);
+    double* const raw = raw_buf.get();
     parallel_for(0, npix, [&](int lo, int hi) {
         for (int p = lo; p < hi; ++p) {
-            double in[3] = {rgb[p * 3 + 0], rgb[p * 3 + 1], rgb[p * 3 + 2]};
+            double in[3];
+            src.load(p, in);
             Vec2 tc;
             double b;
             prophoto_rgb_to_tc_b(in, &tc, &b);
@@ -448,7 +516,7 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // scatter/halation sigmas under deactivate_spatial_effects (params_builder.py),
     // never boost_ev, so the boost fires whenever boost_ev > 0. boost_ev == 0
     // (schema/UI default) is a strict identity -> default goldens stay bit-exact.
-    apply_highlight_boost(raw.data(), width, height, params.halation);
+    apply_highlight_boost(raw, width, height, params.halation);
 
     // Camera optical diffusion filter (Black Pro-Mist family), applied on the
     // float64 irradiance AFTER the highlight boost and BEFORE lens blur /
@@ -459,7 +527,7 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // is expressed by the digest zeroing .active, params_builder.py). No-op unless
     // active (schema default false), so default params stay bit-exact.
     if (params.diffusion_filter.active) {
-        apply_diffusion_filter_um(raw.data(), width, height,
+        apply_diffusion_filter_um(raw, width, height,
                                   params.diffusion_filter, params.pixel_size_um);
     }
 
@@ -477,7 +545,7 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
         double sigma = params.lens_blur_um / params.pixel_size_um;
         if (sigma > 0.0) {
             double sg[3] = {sigma, sigma, sigma};
-            gaussian_blur_per_channel_d(raw.data(), width, height, 3, sg);
+            gaussian_blur_per_channel_d(raw, width, height, 3, sg);
         }
     }
 
@@ -487,7 +555,7 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
     // digest_halation_params only when the spatial digest is on and the preset is
     // known), so the spatial-OFF goldens still skip it.
     if (params.halation.active) {
-        apply_halation_um(raw.data(), width, height, params.halation,
+        apply_halation_um(raw, width, height, params.halation,
                           params.pixel_size_um);
     }
 
@@ -511,6 +579,20 @@ void expose(const double* rgb, int width, int height, const FilmingParams& param
             log_raw_out[i] = static_cast<float>(lr);
         }
     });
+}
+
+}  // namespace
+
+void expose(const double* rgb, int width, int height, const FilmingParams& params,
+            const NdArray& tc_lut, float* log_raw_out) {
+    expose_impl(SrcF64{rgb}, width, height, params, tc_lut, log_raw_out);
+}
+
+void expose_f32_gain(const float* rgb, double gain, int width, int height,
+                     const FilmingParams& params, const NdArray& tc_lut,
+                     float* log_raw_out) {
+    expose_impl(SrcF32Gain{rgb, gain}, width, height, params, tc_lut,
+                log_raw_out);
 }
 
 void develop(const float* log_raw, int width, int height, const Profile& film,

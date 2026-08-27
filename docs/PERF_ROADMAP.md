@@ -55,6 +55,15 @@ GPU pipeline. CPU micro-opt alone won't close that; the gap is **architectural (
   one-shot renders skip the full-buffer memo hashing and stores
   (`spk_params.disable_buffer_memos`, set by the JNI for non-preview renders: −275 ms at
   3.1 MP, ≈ −1.1 s at 12 MP) + memo keys computed once per miss instead of twice.
+- **S6 — export fast path part 2** (#121, item 4): the full-res float64 intermediates are
+  gone from the common paths — direct float32 filming on one-shot no-op-geometry renders
+  (`expose_f32_gain` + float32 AE metering), fused expose/scan per-pixel passes (`raw` /
+  `lin_rgb` exist only when an active spatial/pointwise op needs the plane, and then
+  uninitialized), free-at-last-use buffer lifetimes, move-passthrough geometry. 12 MP host
+  VmHWM: print **1.10 → 0.43 GB (−61%)**, scan **0.97 → 0.43 GB (−55%)**; render transients
+  ~840 → ~140 MB — a 12 MP export now fits comfortably on a 4 GB device. Byte-identical
+  (no arithmetic change; scenario-G direct-vs-materialized gates), and slightly faster
+  (cold scan 196.9 → 179.8 ms at 512²/4T from the killed memsets + fused loops).
 
 Measured 2026-07-02 (512×512 medians, `SPK_NUM_THREADS=8` on the 4-core container): warm print
 edits 153–162 ms vs 402 ms cold; warm scan 144–159 ms vs 243 ms cold. Note the older 1200×900

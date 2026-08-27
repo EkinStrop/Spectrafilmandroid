@@ -53,8 +53,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -85,7 +83,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -135,36 +132,6 @@ fun TextTooltip(
         state = state,
         modifier = modifier,
     ) { content() }
-}
-
-/**
- * An [IconButton] that shows a long-press tooltip carrying [tooltip] and uses the
- * same string as the icon's contentDescription. Drop-in replacement for the
- * repetitive IconButton + Icon + TooltipBox pattern across the editor chrome.
- *
- * [tint] defaults to the inherited content colour so it works on both the dark
- * preview scrim (pass Color.White) and on tonal surfaces (omit for the default).
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun TooltipIconButton(
-    icon: ImageVector,
-    tooltip: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    tint: Color = Color.Unspecified,
-    contentDescription: String = tooltip,
-) {
-    TextTooltip(text = tooltip) {
-        IconButton(onClick = onClick, enabled = enabled, modifier = modifier) {
-            Icon(
-                imageVector = icon,
-                contentDescription = contentDescription,
-                tint = if (tint == Color.Unspecified) LocalContentColor.current else tint,
-            )
-        }
-    }
 }
 
 /**

@@ -102,10 +102,6 @@ object StockCatalog {
     private fun groupOrder(ctx: Context, groupId: String): Int =
         groups(ctx).firstOrNull { it.id == groupId }?.order ?: Int.MAX_VALUE
 
-    /** True if [id] denotes a print medium (print film or print paper). */
-    fun isPrintKind(ctx: Context, id: String): Boolean =
-        stocks(ctx)[id]?.kind?.let { it == "print_paper" || it == "print_film" } ?: false
-
     /** True if [id] is a colour-reversal (slide) film — best viewed as a positive (Slide mode). */
     fun isReversalFilm(ctx: Context, id: String): Boolean = entry(ctx, id)?.isReversal() ?: false
 

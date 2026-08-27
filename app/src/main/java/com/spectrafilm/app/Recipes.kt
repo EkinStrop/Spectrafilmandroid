@@ -51,23 +51,12 @@ object Recipes {
         key != null && file(ctx, key).isFile
 
     /**
-     * Save/update the recipe for [key] from the current editing [state]. The original
-     * image is untouched — only this app-private sidecar JSON is written. [sourceName]
-     * is stored purely as a human-readable hint for any future recipe browser.
-     */
-    fun save(
-        ctx: Context,
-        key: String,
-        state: ParamsState,
-        sourceName: String,
-        rotationDegrees: Int = 0,
-    ) = saveJson(ctx, key, Presets.toJsonString(state), sourceName, rotationDegrees)
-
-    /**
      * Save/update the recipe for [key] from a PRE-SERIALIZED params payload
      * ([Presets.toJsonString]). Serializing reads live Compose [ParamsState] field-by-field
-     * and must happen on the main thread; this overload takes the finished string so only
+     * and must happen on the main thread; this takes the finished string so only
      * the envelope build + file write cross to IO — avoiding a torn off-thread snapshot.
+     * The original image is untouched — only this app-private sidecar JSON is written;
+     * [sourceName] is stored purely as a human-readable hint for any future recipe browser.
      */
     fun saveJson(
         ctx: Context,

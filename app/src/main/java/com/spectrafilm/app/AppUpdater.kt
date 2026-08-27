@@ -23,10 +23,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 data class UpdateInfo(
-    val latestTag: String,        // e.g. "v0.6.0"
+    val latestTag: String,        // e.g. "v0.9.0"
     val currentVersion: String,   // installed versionName
     val releaseUrl: String,       // html_url of the release page
-    val apkUrl: String?,          // first .apk asset, if any
     val isNewer: Boolean,
 )
 
@@ -64,21 +63,10 @@ object AppUpdater {
             val obj = JSONObject(json)
             val tag = obj.getString("tag_name")
             val url = obj.optString("html_url")
-            var apk: String? = null
-            val assets = obj.optJSONArray("assets")
-            if (assets != null) {
-                for (i in 0 until assets.length()) {
-                    val name = assets.getJSONObject(i).optString("name")
-                    if (name.endsWith(".apk", ignoreCase = true)) {
-                        apk = assets.getJSONObject(i).optString("browser_download_url"); break
-                    }
-                }
-            }
             UpdateInfo(
                 latestTag = tag,
                 currentVersion = current,
                 releaseUrl = url,
-                apkUrl = apk,
                 isNewer = isNewer(current, tag),
             )
         }.getOrNull()
@@ -96,7 +84,7 @@ object AppUpdater {
         }
     }
 
-    /** True if [tag] (e.g. "v0.6.0") is a strictly newer semver than installed [current]. */
+    /** True if [tag] (e.g. "v0.9.0") is a strictly newer semver than installed [current]. */
     internal fun isNewer(current: String, tag: String): Boolean {
         val c = parseSemver(current) ?: return false
         val t = parseSemver(tag) ?: return false

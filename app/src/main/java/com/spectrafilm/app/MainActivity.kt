@@ -277,7 +277,7 @@ class MainActivity : ComponentActivity() {
         // every previewTick. Keyed by the decode-affecting inputs only (URI + kind + RAW WB/
         // temp/tint + manual rotation + target edge); any change to one of those invalidates it
         // (the key mismatches → fresh decode). See DecodedSourceCache for the read-only proof
-        // that the same buffer can be re-fed to the engine without a defensive copy. EXPORT and
+        // that the same buffer can be re-fed to the engine without a defensive copy.
         // EXPORT does NOT use this cache — it always decodes fresh at EXPORT_MAX_EDGE_PX.
         val sourceCache = remember { DecodedSourceCache() }
         // Retained-result grade cache: grade-only edits (saturation/vibrance/gamut/
@@ -430,7 +430,8 @@ class MainActivity : ComponentActivity() {
 
         // Copy/paste settings (Lightroom-style, backlog #10): a session clipboard holding
         // a full params snapshot, so a look dialed on one image can be pasted onto another.
-        // Lives at AppRoot scope so it survives switching the source.
+        // Lives in EditorScreen scope: it survives switching the source, but NOT a round-trip
+        // to Settings/About (EditorScreen leaves composition there and the remember is dropped).
         var settingsClipboard by remember { mutableStateOf<String?>(null) }
 
         // Capture the pre-apply look, run [apply], then snapshot the full preset and arm
@@ -615,7 +616,7 @@ class MainActivity : ComponentActivity() {
                         ctx.contentResolver.takePersistableUriPermission(
                             uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
                         )
-                    }
+                    }.onFailure { Diag.w("persistable uri permission not granted: ${it.message}") }
                     rotation = SourceRotation.NONE
                     val mime = runCatching { ctx.contentResolver.getType(uri) }.getOrNull()
                     if (isNonRawImage(name, mime)) {
@@ -670,9 +671,12 @@ class MainActivity : ComponentActivity() {
         ) { uri ->
             val text = pendingLutText
             if (uri != null && text != null) {
-                runCatching { saveTextToUri(ctx, uri, text) }
-                    .onSuccess { status = "LUT saved" }
-                    .onFailure { status = "LUT save failed: ${it.message}" }
+                scope.launch {
+                    // SAF write off-main; status (Compose state) lands back on main.
+                    val r = withContext(Dispatchers.IO) { runCatching { saveTextToUri(ctx, uri, text) } }
+                    r.onSuccess { status = "LUT saved" }
+                        .onFailure { status = "LUT save failed: ${it.message}" }
+                }
             }
             pendingLutText = null
         }
@@ -1003,6 +1007,7 @@ class MainActivity : ComponentActivity() {
                                 state.localAdjustments)
                         }
                     }.onSuccess { bmp -> withContext(Dispatchers.Main) { preview = bmp } }
+                        .onFailure { Diag.w("render mode=draft failed: ${it.message}") }
                     return@collect
                 }
                 val draftEdge = minOf(DRAFT_RENDER_MAX_PX, fullEdge)
@@ -1022,6 +1027,7 @@ class MainActivity : ComponentActivity() {
                         ).use { res -> simResultToBitmapGraded(res, state.savingCctfEncoding, state.saturation, state.vibrance, state.gamutCompress, state.localAdjustments) }
                     }
                 }.onSuccess { bmp -> withContext(Dispatchers.Main) { preview = bmp } }
+                    .onFailure { Diag.w("render mode=draft failed: ${it.message}") }
             }
         }
 
@@ -1132,8 +1138,9 @@ class MainActivity : ComponentActivity() {
         }
 
         // MEMORY (#2): `preview` and `beforePreview` are intentionally LEFT TO GC, not recycled
-        // on swap. Recycling them is NOT provably safe: `preview` is consumed by HistogramCard,
-        // which reads its pixels with getPixels() from a background coroutine
+        // on swap. Recycling them is NOT provably safe: `preview` is consumed by
+        // PreviewHistogramOverlay (Viewer.kt), which reads its pixels with getPixels() from a
+        // background coroutine
         // (LaunchedEffect(bitmap){ withContext(Dispatchers.Default){ computeHistogram(bitmap) } }).
         // computeHistogram is a tight, non-suspending loop, so when `preview` swaps mid-compute
         // the previous coroutine is NOT actually cancelled (cancellation is cooperative) and runs
@@ -1188,6 +1195,7 @@ class MainActivity : ComponentActivity() {
                     Recipes.saveJson(ctx, recipeKey, paramsJson, sourceName, rotation.degrees)
                 }
             }.onSuccess { hasRecipe = true }
+                .onFailure { Diag.w("recipe auto-save failed: ${it.message}") }
         }
 
         // --- Undo/redo capture (debounced coalescing) ---
@@ -1411,7 +1419,7 @@ class MainActivity : ComponentActivity() {
                                                 org.json.JSONObject(base), org.json.JSONObject(full), a,
                                             )
                                             Presets.decode(blended, state)
-                                        }
+                                        }.onFailure { Diag.w("preset amount blend failed: ${it.message}") }
                                         previewTick++
                                     }
                                 },

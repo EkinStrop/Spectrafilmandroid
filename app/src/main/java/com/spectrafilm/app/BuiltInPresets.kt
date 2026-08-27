@@ -74,8 +74,6 @@ object BuiltInPresets {
         return out
     }
 
-    fun byId(ctx: Context, id: String): BuiltInPreset? = load(ctx).firstOrNull { it.id == id }
-
     /** Apply a built-in preset's authored params onto [into]. Omitted fields are untouched. */
     fun apply(preset: BuiltInPreset, into: ParamsState) = applyParams(preset.params, into)
 

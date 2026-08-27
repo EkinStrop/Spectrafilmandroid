@@ -31,11 +31,15 @@ data class ExportOptions(
     /**
      * Target long edge in px for a post-render downscale, or null = full resolution. 16-bit formats
      * (TIFF / PNG16) always export full-res — their save path writes the float buffer directly, so a
-     * Bitmap resize doesn't apply; the sheet pins Size to Full for them.
+     * Bitmap resize doesn't apply; the sheet hides the Size dropdown for them and this short-circuits
+     * to null (the stored size choice itself is left untouched). An empty/unset custom field
+     * (customLongEdge <= 0) also means full resolution — never a MIN_CUSTOM_EDGE thumbnail.
      */
     fun targetLongEdge(): Int? = when {
         format.isHighBitDepth() -> null
-        size == ExportSize.CUSTOM -> customLongEdge.coerceIn(MIN_CUSTOM_EDGE, MAX_CUSTOM_EDGE)
+        size == ExportSize.CUSTOM ->
+            if (customLongEdge <= 0) null
+            else customLongEdge.coerceIn(MIN_CUSTOM_EDGE, MAX_CUSTOM_EDGE)
         else -> size.longEdge
     }
 

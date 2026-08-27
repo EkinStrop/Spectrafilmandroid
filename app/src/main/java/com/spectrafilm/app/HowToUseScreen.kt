@@ -14,6 +14,7 @@
  */
 package com.spectrafilm.app
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,6 +59,10 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun HowToUseScreen(onBack: () -> Unit) {
     val ctx = LocalContext.current
+
+    // System back dismisses the guide (mirrors the top-bar Back button) instead of
+    // falling through to the host — which could pop the whole app from onboarding.
+    BackHandler { onBack() }
 
     Surface(
         color = MaterialTheme.colorScheme.background,

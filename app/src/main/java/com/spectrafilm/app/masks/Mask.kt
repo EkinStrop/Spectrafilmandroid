@@ -4,8 +4,8 @@
  *
  * The foundation of the masking keystone (forum pain #2: "no way to limit a change to one area").
  * Pure Kotlin, JVM-testable, ZERO engine/parity impact — masks are rasterized to an alpha buffer and
- * composited on the engine's OUTPUT (the `simResultToBitmap` seam) in a later increment, so the film
- * render itself is untouched.
+ * composited on the engine's OUTPUT by the live [MaskCompositor] (wired via EngineHelpers'
+ * `simResultToBitmapGraded` seam), so the film render itself is untouched.
  *
  * Geometry is stored NORMALIZED (0..1 in image space) so one mask drives the 640px draft, the zoom
  * ROI, and the full-res export identically (resolution-independent). A [Mask] is a list of shape

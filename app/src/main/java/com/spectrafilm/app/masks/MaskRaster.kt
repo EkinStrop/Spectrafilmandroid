@@ -3,9 +3,9 @@
  * Film modeling powered by spektrafilm.
  *
  * Turn a normalized [Mask] into a per-pixel alpha buffer at a concrete resolution, so the compositor
- * (a later increment, on the `simResultToBitmap` output seam) can blend a Tier-A adjustment by alpha.
- * Pure Kotlin; no engine touched. Because the mask geometry is normalized, the SAME mask rasterizes
- * correctly for the draft, the zoom ROI and the full-res export — only the [w]×[h] differs.
+ * ([MaskCompositor], live on the `simResultToBitmapGraded` output seam) can blend a Tier-A adjustment
+ * by alpha. Pure Kotlin; no engine touched. Because the mask geometry is normalized, the SAME mask
+ * rasterizes correctly for the draft, the zoom ROI and the full-res export — only the [w]×[h] differs.
  */
 package com.spectrafilm.app.masks
 
@@ -14,7 +14,8 @@ object MaskRaster {
     /**
      * Rasterize [mask] to a row-major [w]×[h] alpha buffer (values in [0,1]). Pixel centers map to
      * normalized coordinates `((x+0.5)/w, (y+0.5)/h)`. An empty (no-component) non-inverted mask is all
-     * zero; the buffer is reusable across renders via a mask-hash + size cache in the compositor.
+     * zero. The buffer is allocated fresh on every call (the compositor rasterizes per render); a
+     * mask-hash + size cache to reuse it remains future work.
      */
     fun rasterize(mask: Mask, w: Int, h: Int): FloatArray {
         val out = FloatArray(w * h)

@@ -7,8 +7,8 @@
  * quality, theme, a "Show onboarding again" action, a "Report an issue" entry (and a
  * "View issues" link), and an embedded About card. Edits write straight back to the
  * passed AppSettings and mirror into local Compose state so the controls update live.
- * The host (MainActivity) reads AppSettings on the next launch / immediately re-applies
- * relevant values (theme, preview size, default profiles, output space).
+ * Only theme is re-applied immediately (via onThemeChanged); the render defaults
+ * (preview size, default profiles, output space) apply on the next launch.
  */
 package com.spectrafilm.app
 

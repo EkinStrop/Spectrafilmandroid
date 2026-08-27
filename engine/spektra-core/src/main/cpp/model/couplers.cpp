@@ -17,6 +17,7 @@
 
 #include "kernels/exponential_filter.h"
 #include "kernels/parallel.h"
+#include "kernels/uniform_axis.h"
 
 namespace spk {
 
@@ -78,18 +79,40 @@ long long binary_search_with_guess(double key, const double* arr, int len,
 // fast_interp-style interpolation used by interpolate_exposure_to_density:
 // per-channel axis xa (n,), clamp to endpoint density values. Matches the
 // searchsorted(side='right') indexing in utils/fast_interp.py.
-double fast_interp_channel(double x, const double* xa, const double* y, int n) {
+//
+// `ua` is the axis's precomputed O(1) lookup hint (EXPORT_FASTPATH item 1),
+// built ONCE per apply_* call by detect_uniform_axis, far from the per-pixel
+// loop. When the axis qualifies (le/gamma is uniform-to-rounding for every
+// bundled profile) the bracket comes from the O(1) estimate + fix-up walk,
+// which returns the IDENTICAL `low` this binary search picks (see
+// kernels/uniform_axis.h) — so the interpolation arithmetic below is
+// unchanged and the result is bit-identical. A non-qualifying axis (e.g. a
+// descending one from a negative gamma) keeps the exact search.
+//
+// NaN guard: np.interp propagates NaN (np_interp_array below checks
+// explicitly), but this search takes neither clamp branch on NaN and every
+// probe comparison is false, ending at low == -1 — an out-of-bounds xa[-1]
+// read. Return NaN up front instead (the previous behavior was undefined, not
+// covered by any golden).
+double fast_interp_channel(double x, const double* xa, const double* y, int n,
+                           const UniformAxis<double>& ua) {
+    if (std::isnan(x)) return x;
     if (x <= xa[0]) return y[0];
     if (x >= xa[n - 1]) return y[n - 1];
-    int lo = 0, hi = n;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (xa[mid] <= x)
-            lo = mid + 1;
-        else
-            hi = mid;
+    int low;
+    if (ua.ok) {
+        low = uniform_axis_bracket(x, xa, n, 1, ua);
+    } else {
+        int lo = 0, hi = n;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (xa[mid] <= x)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        low = lo - 1;
     }
-    int low = lo - 1;
     double x0 = xa[low];
     double dx = xa[low + 1] - x0;
     double t = dx != 0.0 ? (x - x0) / dx : 0.0;
@@ -247,6 +270,11 @@ void apply_density_correction_dir_couplers(const float* density_cmy, int npix,
             curve_c[c][k] = dc0[k * 3 + c];
         }
     }
+    // O(1) bracket hints for the three per-channel axes (EXPORT_FASTPATH
+    // item 1); a non-qualifying axis keeps the exact binary search.
+    UniformAxis<double> ua_c[3];
+    for (int c = 0; c < 3; ++c)
+        ua_c[c] = detect_uniform_axis(axis_c[c].data(), n, 1);
     // Deterministic parallel chunks: each pixel reads only its own density_cmy /
     // log_raw entries and writes only its own out entries (the per-pixel silver
     // snapshot already handles out aliasing density_cmy WITHIN a pixel), so the
@@ -264,8 +292,8 @@ void apply_density_correction_dir_couplers(const float* density_cmy, int npix,
                 double correction = 0.0;
                 for (int k = 0; k < 3; ++k) correction += silver[k] * M[k * 3 + c];
                 double log_raw_0 = static_cast<double>(log_raw[p * 3 + c]) - correction;
-                out[p * 3 + c] = static_cast<float>(
-                    fast_interp_channel(log_raw_0, axis_c[c].data(), curve_c[c].data(), n));
+                out[p * 3 + c] = static_cast<float>(fast_interp_channel(
+                    log_raw_0, axis_c[c].data(), curve_c[c].data(), n, ua_c[c]));
             }
         }
     });
@@ -390,14 +418,18 @@ void apply_density_correction_dir_couplers_spatial(
             curve_c[c][k] = dc0[k * 3 + c];
         }
     }
+    // O(1) bracket hints (EXPORT_FASTPATH item 1); fallback = exact search.
+    UniformAxis<double> ua_c[3];
+    for (int c = 0; c < 3; ++c)
+        ua_c[c] = detect_uniform_axis(axis_c[c].data(), n, 1);
     // Per-pixel independent interp -> deterministic parallel chunks.
     parallel_for(0, npix, [&](int lo, int hi) {
         for (int p = lo; p < hi; ++p) {
             for (int c = 0; c < 3; ++c) {
                 double log_raw_0 =
                     static_cast<double>(log_raw[p * 3 + c]) - correction[p * 3 + c];
-                out[p * 3 + c] = static_cast<float>(
-                    fast_interp_channel(log_raw_0, axis_c[c].data(), curve_c[c].data(), n));
+                out[p * 3 + c] = static_cast<float>(fast_interp_channel(
+                    log_raw_0, axis_c[c].data(), curve_c[c].data(), n, ua_c[c]));
             }
         }
     });

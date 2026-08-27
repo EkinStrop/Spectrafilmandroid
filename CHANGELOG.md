@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Export fast path, part 1 — EXPORT_FASTPATH items 1+2 (#120)
+
+Bit-exact speed work; every default render path stays byte-identical (36-gate
+parity suite green; kernel outputs verified byte-identical over 12.6 M
+randomized lookups).
+
+- **O(1) uniform-axis density lookups** (`kernels/uniform_axis.h`): the
+  per-pixel binary searches in the exposure→density interpolation
+  (`interp1d_planar3`) and the DIR-coupler interpolation
+  (`fast_interp_channel`) are replaced by a load-time uniformity check + an
+  O(1) index estimate + a fix-up walk that restores the exact searchsorted
+  bracket, so the interpolation runs on identical operands. Every bundled
+  profile's log_exposure axis qualifies; anything else (non-uniform,
+  descending, repeated knots) keeps the identical binary search. Host,
+  4.19 M px, 1 thread: exposure→density 725.5 → 65.6 ms (**11.1×**), DIR
+  couplers 637.3 → 70.3 ms (**9.1×**); cold scan route −9.4%, cold print
+  route −6.0% (512², 4 threads).
+- **`fast_interp_channel` NaN guard**: a NaN query previously read `xa[-1]`
+  (undefined behavior); it now propagates NaN like `np_interp_array`.
+- **One-shot renders stop paying the memo machinery**
+  (`spk_params.disable_buffer_memos`): the film-density/print-density memo
+  keys FNV-hash the entire input buffer — pure overhead for an export whose
+  key can never be re-used. The app's JNI now sets the flag for every
+  non-preview render (export, magnifier crop): no key hashing, no full-size
+  result copies held in the engine, and warm preview slots survive untouched.
+  Measured −275 ms per one-shot render at 3.1 MP (≈ −1.1 s at 12 MP, linear).
+  Preview misses that do memoize now compute the key once instead of twice.
+  Gated by the new `test_simulate_e2e` scenario G (pixels byte-identical, all
+  six memo counters frozen, warm slots kept).
+
 ## v0.9.0 (versionCode 11) — 2026-08-26 — parity fixes, gamut compression, spatial decoupling, fork engine adoption + the speed pass 🔍⚡
 
 Everything landed after the v0.8.0 release (2026-06-09): a codebase-wide review

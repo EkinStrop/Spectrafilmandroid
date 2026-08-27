@@ -12,6 +12,10 @@
  */
 #include "interp.h"
 
+#include <cmath>
+
+#include "uniform_axis.h"
+
 namespace spk {
 
 namespace {
@@ -76,7 +80,21 @@ void interp1d_planar3(const float* img, int npix,
                       const float* fp, int n,
                       float* out) {
     // fp is (n,3) row-major: fp[k*3 + c]. Build a small stride-3 gather inline.
+    //
+    // Bracket lookup is O(1) when the axis qualifies (EXPORT_FASTPATH item 1):
+    // detect_uniform_axis runs once per call — O(n), far from the pixel loop —
+    // and uniform_axis_bracket then returns the IDENTICAL `low` the right-biased
+    // binary search picks (see kernels/uniform_axis.h), so the interpolation
+    // below runs on identical operands and the output is bit-identical. A
+    // non-qualifying axis keeps the exact binary search, unchanged.
+    //
+    // NaN queries: the binary searches here land on low == n-2 (every NaN
+    // comparison is false, so idx converges to n and clamps), which propagates
+    // NaN through t. The fast path pins that same low BEFORE the estimate —
+    // (int)(NaN * inv_step) would be undefined — keeping NaN output bytes
+    // identical to the search path.
     if (common_axis) {
+        const UniformAxis<float> ua = detect_uniform_axis(xp, n, 1);
         for (int i = 0; i < npix; ++i) {
             const float* px = img + (long)i * 3;
             float* po = out + (long)i * 3;
@@ -86,10 +104,16 @@ void interp1d_planar3(const float* img, int npix,
                 if (n <= 0) { po[c] = 0.0f; continue; }
                 if (n == 1 || x <= xp[0]) { po[c] = fp[c]; continue; }
                 if (x >= xp[n - 1]) { po[c] = fp[(n - 1) * 3 + c]; continue; }
-                int idx = searchsorted_right(xp, n, x);
-                int low = idx - 1;
-                if (low < 0) low = 0;
-                if (low > n - 2) low = n - 2;
+                int low;
+                if (ua.ok) {
+                    low = std::isnan(x) ? n - 2
+                                        : uniform_axis_bracket(x, xp, n, 1, ua);
+                } else {
+                    int idx = searchsorted_right(xp, n, x);
+                    low = idx - 1;
+                    if (low < 0) low = 0;
+                    if (low > n - 2) low = n - 2;
+                }
                 float dx = xp[low + 1] - xp[low];
                 float t = (dx != 0.0f) ? (x - xp[low]) / dx : 0.0f;
                 float y0 = fp[low * 3 + c];
@@ -99,6 +123,8 @@ void interp1d_planar3(const float* img, int npix,
         }
     } else {
         // Channel-specific axis: xp is (n,3) row-major; column c is the axis.
+        UniformAxis<float> ua_c[3];
+        for (int c = 0; c < 3; ++c) ua_c[c] = detect_uniform_axis(xp + c, n, 3);
         for (int i = 0; i < npix; ++i) {
             const float* px = img + (long)i * 3;
             float* po = out + (long)i * 3;
@@ -109,15 +135,22 @@ void interp1d_planar3(const float* img, int npix,
                 float xaN = xp[(n - 1) * 3 + c];
                 if (n == 1 || x <= xa0) { po[c] = fp[c]; continue; }
                 if (x >= xaN) { po[c] = fp[(n - 1) * 3 + c]; continue; }
-                // Binary search on the strided column.
-                int lo = 0, hi = n;
-                while (lo < hi) {
-                    int mid = lo + ((hi - lo) >> 1);
-                    if (x < xp[mid * 3 + c]) hi = mid; else lo = mid + 1;
+                int low;
+                if (ua_c[c].ok) {
+                    low = std::isnan(x)
+                              ? n - 2
+                              : uniform_axis_bracket(x, xp + c, n, 3, ua_c[c]);
+                } else {
+                    // Binary search on the strided column.
+                    int lo = 0, hi = n;
+                    while (lo < hi) {
+                        int mid = lo + ((hi - lo) >> 1);
+                        if (x < xp[mid * 3 + c]) hi = mid; else lo = mid + 1;
+                    }
+                    low = lo - 1;
+                    if (low < 0) low = 0;
+                    if (low > n - 2) low = n - 2;
                 }
-                int low = lo - 1;
-                if (low < 0) low = 0;
-                if (low > n - 2) low = n - 2;
                 float xl = xp[low * 3 + c];
                 float xh = xp[(low + 1) * 3 + c];
                 float dx = xh - xl;

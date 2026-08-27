@@ -48,6 +48,13 @@ GPU pipeline. CPU micro-opt alone won't close that; the gap is **architectural (
 - **S3 — Kotlin retained-result grade cache** — grade-only edits do zero native work.
 - **S4 — serial-loop parallelization** (DIR-coupler develop, exposure→density interp, expose
   tails via deterministic `parallel_for`) — cold scan 243 → 211 ms (−13%).
+- **S5 — export fast path part 1** (#120, `docs/EXPORT_FASTPATH.md` items 1+2): O(1)
+  uniform-axis density lookups (`kernels/uniform_axis.h` — exposure→density **11.1×**, DIR
+  couplers **9.1×** on-kernel at 1 thread; cold scan −9.4% / cold print −6.0% at 512², bytes
+  identical by bracket construction with a binary-search fallback for non-qualifying axes) +
+  one-shot renders skip the full-buffer memo hashing and stores
+  (`spk_params.disable_buffer_memos`, set by the JNI for non-preview renders: −275 ms at
+  3.1 MP, ≈ −1.1 s at 12 MP) + memo keys computed once per miss instead of twice.
 
 Measured 2026-07-02 (512×512 medians, `SPK_NUM_THREADS=8` on the 4-core container): warm print
 edits 153–162 ms vs 402 ms cold; warm scan 144–159 ms vs 243 ms cold. Note the older 1200×900

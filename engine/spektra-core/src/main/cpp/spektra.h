@@ -289,6 +289,20 @@ typedef struct {
     int32_t tone_curve_rgb_n[3];       /* per-channel R,G,B point counts */
     float   tone_curve_rgb_x[3][SPK_TONE_MAX_PTS];
     float   tone_curve_rgb_y[3][SPK_TONE_MAX_PTS];
+
+    /* --- runtime render control (NOT a photographic parameter) ---
+     * Opt-out of the engine's full-buffer render memos (both film-density
+     * slots + the print-density slot) for a ONE-SHOT render. The memo keys
+     * FNV-hash the ENTIRE input buffer (float64 rgb / float32 film density) —
+     * hundreds of ms at 12 MP, plus two full-size result copies held in the
+     * engine — pure overhead for a render whose key can never be re-used
+     * (export, magnifier crop). The memos are transparent perf artifacts
+     * (byte-identical hit or miss), so this flag CANNOT change output pixels;
+     * it also leaves any warm slot untouched rather than evicting it.
+     * Default 0: memos stay active — previews and every existing caller are
+     * unchanged. Does not affect the tc_lut cache or the spectral 3D-LUT memo
+     * (their keys are cheap). Gated by test_simulate_e2e scenario G. */
+    int32_t disable_buffer_memos;
 } spk_params;
 
 /* Initialise `p` to the physical defaults that mirror a default-constructed

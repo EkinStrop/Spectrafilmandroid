@@ -1,0 +1,178 @@
+/*
+ * Spektrafilm for Android — host test for the GPU preview fast-path (GPU M1, #146).
+ * Copyright (C) 2026 Spektrafilm Android contributors. GPLv3.
+ * Port of spektrafilm (GPLv3) by Andrea Volpato — film modeling powered by spektrafilm.
+ *
+ * LOCAL-ONLY (not in the 38-gate CI table): exercising the real Vulkan branch
+ * needs an ICD, which CI runners don't guarantee. Locally, run it under
+ * SwiftShader (Chromium bundles one):
+ *   VK_ICD_FILENAMES=<...>/vk_swiftshader_icd.json /tmp/test_gpu_host <asset_dir>
+ * WITHOUT an ICD (or when built without SPK_ENABLE_VULKAN) the test still
+ * passes: it then proves the fallback path — gpu_preview=1 must be a strict
+ * no-op (byte-identical to gpu_preview=0) when no GPU is available.
+ *
+ * What it proves, per route (scan_film and print), per kernel class:
+ *  - LINEAR kernel (production defaults: scanner unsharp (0.7, 0.7) is ON, so
+ *    interactive previews hit the linear kernel + CPU plane/encode tail).
+ *  - FUSED kernel (sharpening zeroed: the full-chain sRGB shader path).
+ *  1. LAW (#149): spk_simulate (EXPORT) with gpu_preview=1 is BYTE-IDENTICAL to
+ *     the same export with gpu_preview=0 — the toggle cannot reach export.
+ *  2. The GPU preview render is within the oracle tolerance band (max_abs <=
+ *     1e-4) of the CPU EXPORT render on the same pixels (input chosen small
+ *     enough that spk_simulate_preview skips the downscale, so grids match).
+ *     For scale: the CPU preview itself (scanner LUT forced on) sits ~5e-5 off.
+ *  3. Warm-host determinism: repeated GPU preview renders are byte-identical.
+ *  4. The one-time self-check ran and passed (spk_gpu_scan_state() == 1) when a
+ *     GPU is present; without one the state stays 0 and nothing engaged.
+ *
+ * Build (host) — full source set + -DSPK_ENABLE_VULKAN=1 -lvulkan, from the cpp
+ * root (see CLAUDE.md for the base compile line; SRC already includes gpu/).
+ */
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "spektra.h"
+
+namespace {
+
+int g_fail = 0;
+
+void check(bool ok, const std::string& what) {
+    std::printf("%s: %s\n", ok ? "ok" : "FAIL", what.c_str());
+    if (!ok) g_fail = 1;
+}
+
+double max_abs(const std::vector<float>& a, const std::vector<float>& b) {
+    double m = 0.0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        double d = std::fabs(static_cast<double>(a[i]) - static_cast<double>(b[i]));
+        if (d > m) m = d;
+    }
+    return m;
+}
+
+bool bytes_eq(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() &&
+           std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+}
+
+// Deterministic synthetic linear-RGB input covering shadows..highlights.
+std::vector<float> make_input(int w, int h) {
+    std::vector<float> v(static_cast<size_t>(w) * h * 3);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            size_t i = (static_cast<size_t>(y) * w + x) * 3;
+            v[i + 0] = 0.02f + 0.9f * x / (w - 1);
+            v[i + 1] = 0.02f + 0.9f * y / (h - 1);
+            v[i + 2] = 0.05f + 0.8f * ((x + y) % 17) / 16.0f;
+        }
+    return v;
+}
+
+const int W = 64, H = 48;
+std::vector<float> g_input;
+
+bool render(spk_engine* eng, const spk_params& q, bool preview,
+            std::vector<float>* out) {
+    spk_image in{g_input.data(), W, H, 0};
+    spk_image o{};
+    spk_status st = preview ? spk_simulate_preview(eng, &in, &q, &o)
+                            : spk_simulate(eng, &in, &q, &o);
+    if (st != SPK_OK) { std::printf("FAIL: render st=%d\n", st); g_fail = 1; return false; }
+    out->assign(o.data, o.data + static_cast<size_t>(o.width) * o.height * 3);
+    spk_image_free(&o);
+    return true;
+}
+
+// One kernel-class check set on one route. `label` names route+class.
+void run_case(spk_engine* eng, const spk_params& base, const char* label,
+              bool gpu_present) {
+    spk_params cpu_p = base;   // gpu_preview = 0
+    spk_params gpu_p = base;
+    gpu_p.gpu_preview = 1;
+
+    std::vector<float> exp_a, exp_b, prev_cpu, g1, g2, g3;
+    if (!render(eng, cpu_p, false, &exp_a)) return;
+    if (!render(eng, gpu_p, false, &exp_b)) return;
+    check(bytes_eq(exp_a, exp_b),
+          std::string(label) + ": EXPORT ignores gpu_preview (byte-identical)");
+
+    if (!render(eng, cpu_p, true, &prev_cpu)) return;
+    if (!render(eng, gpu_p, true, &g1)) return;
+    if (!render(eng, gpu_p, true, &g2)) return;
+    if (!render(eng, gpu_p, true, &g3)) return;
+    check(bytes_eq(g1, g2) && bytes_eq(g1, g3),
+          std::string(label) + ": GPU preview x3 byte-identical (warm host)");
+
+    const double cpu_band = max_abs(prev_cpu, exp_a);
+    const double gpu_band = max_abs(g1, exp_a);
+    std::printf("info %s: preview-vs-export max_abs cpu(LUT)=%.3e gpu=%.3e\n",
+                label, cpu_band, gpu_band);
+
+    if (gpu_present) {
+        // Bar: within the oracle tolerance of the export, OR no worse than the
+        // existing CPU preview. The second arm matters on the print route,
+        // where the preview's forced ENLARGER LUT (~1e-4, pre-existing and
+        // GPU-independent) dominates the preview-vs-export distance for CPU
+        // and GPU alike.
+        check(gpu_band <= 1e-4 || gpu_band <= cpu_band,
+              std::string(label) +
+                  ": GPU preview within 1e-4 of export or beats the CPU preview");
+        check(!bytes_eq(g1, prev_cpu),
+              std::string(label) + ": GPU actually engaged (differs from LUT preview)");
+    } else {
+        check(bytes_eq(prev_cpu, g1),
+              std::string(label) + ": no GPU => gpu_preview is a byte-identical no-op");
+    }
+}
+
+void run_all(spk_engine* eng, bool gpu_present) {
+    for (int scan_film = 1; scan_film >= 0; --scan_film) {
+        spk_params p;
+        p.film_profile = "kodak_portra_400";
+        p.print_profile = "kodak_portra_endura";
+        spk_default_params(&p);
+        p.scan_film = scan_film;
+        p.preview_max_size = 640;  // > longest edge => preview on the same grid
+
+        const char* route = scan_film ? "scan" : "print";
+        // Production defaults: scanner unsharp (0.7, 0.7) ON -> LINEAR kernel.
+        run_case(eng, p, (std::string(route) + "/linear").c_str(), gpu_present);
+        // Sharpening off -> FUSED (full-chain sRGB) kernel.
+        spk_params pf = p;
+        pf.scanner_unsharp[0] = 0.0f;
+        pf.scanner_unsharp[1] = 0.0f;
+        run_case(eng, pf, (std::string(route) + "/fused").c_str(), gpu_present);
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) { std::fprintf(stderr, "usage: %s <asset_dir>\n", argv[0]); return 2; }
+    spk_engine* eng = nullptr;
+    if (spk_engine_create(argv[1], &eng) != SPK_OK) {
+        std::fprintf(stderr, "engine create failed from %s\n", argv[1]);
+        return 2;
+    }
+    g_input = make_input(W, H);
+
+    // First pass assumes a GPU; if nothing engaged (state stays 0), rerun all
+    // assertions in fallback mode instead.
+    run_all(eng, /*gpu_present=*/true);
+    int st = spk_gpu_scan_state();
+    if (st == 0) {
+        std::printf("info: no GPU engaged (state=0) — validating fallback law only\n");
+        g_fail = 0;
+        run_all(eng, /*gpu_present=*/false);
+        check(spk_gpu_scan_state() == 0, "self-check never ran without a GPU");
+    } else {
+        check(st == 1, "self-check passed (state == 1)");
+    }
+
+    std::printf(g_fail ? "test_gpu_host: FAIL\n" : "test_gpu_host: ALL OK\n");
+    return g_fail;
+}

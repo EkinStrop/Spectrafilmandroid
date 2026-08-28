@@ -35,13 +35,28 @@ bool cctf_encode_srgb(float* data, size_t n);
 // (10^-D over 81 bands) -> XYZ -> output RGB + sRGB CCTF. Spectral tables:
 //   dye     : NB*3 per-channel dye densities D_c(lambda)  (band-major c,m,y)
 //   icmf    : NB*3 illuminant-premultiplied CMFs          (band-major X,Y,Z)
-//   xyz2rgb : 9 floats, row-major 3x3 XYZ->output-RGB matrix
+//   xyz2rgb : 9 floats, row-major 3x3 XYZ->output-RGB matrix (pass Mc.M composed
+//             to mirror the engine's full linear chain — see the PR #145 probe)
 // Returns false if the GPU path is unavailable or any Vulkan call failed (caller
-// falls back to the CPU scan). NOT bit-exact vs the f64 oracle -> preview only; the
-// export + parity-gated path never call this. On-GPU numeric validation vs the CPU
-// reference is pending arm64 GPU hardware (docs/PERF_ROADMAP.md #1).
+// falls back to the CPU scan). NOT bit-exact vs the f64 oracle -> preview only;
+// the export + parity-gated path never call this (the #149 law revision opens
+// oracle-verified GPU export as future M4 work). MEASURED ON DEVICE (PR #145,
+// docs/research/gpu-device-probe.md): worst-case max_abs 2.15e-06 / rms 7.07e-08
+// vs the f64 chain — 46x/141x inside the oracle tolerance — and byte-identical
+// across repeated dispatches (Adreno 840, driver 512.842.19). The host guards
+// non-finite densities at upload (NaN/Inf -> 1e4f -> black), so shader NaN
+// behaviour never decides pixels.
 bool scan_spectral(const float* cmy, float* rgb, uint32_t npix,
                    const float* dye, const float* icmf, const float* xyz2rgb);
+
+// LINEAR variant (GPU M1, #146): the same 81-band integral, but the output is
+// UNCLIPPED linear output-space RGB — no CAT02 fold, no CCTF, no clamp — so the
+// CPU plane ops (unsharp / lens blur / gamut compression) and the standard
+// encode tail run on it unchanged. `xyz2rgb` is the frame's plain XYZ->RGB
+// matrix (Mc stays in the CPU encode). Same tables, same fallback contract,
+// same preview-only law as scan_spectral.
+bool scan_spectral_linear(const float* cmy, float* rgb, uint32_t npix,
+                          const float* dye, const float* icmf, const float* xyz2rgb);
 
 }  // namespace spk::gpu
 

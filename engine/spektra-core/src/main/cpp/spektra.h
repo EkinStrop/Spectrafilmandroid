@@ -259,6 +259,24 @@ typedef struct {
     int32_t lut_resolution;            /* LUT steps/axis; clamped to [2,192] */
     int32_t neutral_print_filters_from_database; /* bool */
 
+    /* GPU preview fast-path (GPU M1, #146; preview-only per the #149 law
+     * revision — export always renders on the CPU path).
+     *   gpu_preview: WIRED (user toggle, Settings > "GPU preview"). Default 0.
+     *     Consulted ONLY by spk_simulate_preview, which forwards it into
+     *     allow_gpu_scan; spk_simulate (export) and spk_simulate_tap ignore it,
+     *     so the bit-exact parity surface is untouched. When the preview frame
+     *     is eligible, scan() runs density->RGB through the Vulkan fp32 kernel
+     *     (~2e-6 vs the CPU chain per the PR #145 device probe) after a
+     *     one-time on-device self-check; any failure falls back to the CPU for
+     *     that frame (see runtime/stages/scanning.h ScanningParams::allow_gpu).
+     *   allow_gpu_scan: INTERNAL. Set by spk_simulate_preview from gpu_preview;
+     *     every other caller leaves it 0 (spk_default_params zeroes it, the JNI
+     *     marshaller never writes it, and spk_simulate_tap / spk_bake_cube_lut
+     *     hard-zero it defensively). spk_simulate honours it because the preview
+     *     entry funnels through it — direct C callers must keep it 0. */
+    int32_t gpu_preview;               /* bool (wired: preview-only GPU offload toggle) */
+    int32_t allow_gpu_scan;            /* INTERNAL: preview-entry latch, keep 0 */
+
     /* --- gamut compression (opt-in; both default to the byte-identical sentinel) ---
      * Ordinals mirror model/gamut_compression.h's enum classes EXACTLY:
      *   output_gamut_compress  (OutputGamutCompress): 0 = kLegacyClip (DEFAULT; the
@@ -355,6 +373,11 @@ spk_status spk_simulate(spk_engine*, const spk_image* in, const spk_params*, spk
 
 /* Downscaled fast path (to params.preview_max_size) for interactive tuning. */
 spk_status spk_simulate_preview(spk_engine*, const spk_image* in, const spk_params*, spk_image* out);
+
+/* GPU scan self-check state (diagnostics): 0 = not yet run, 1 = passed,
+ * 2 = failed (GPU preview disabled for this process). Meaningful only when the
+ * library was built with SPK_ENABLE_VULKAN and gpu_preview was enabled. */
+int spk_gpu_scan_state(void);
 
 void spk_image_free(spk_image*);
 

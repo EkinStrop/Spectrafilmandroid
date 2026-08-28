@@ -212,6 +212,14 @@ data class SettingsParams(
     val previewMaxSize: Int = 640,
     val previewMode: Boolean = false,
     val neutralPrintFiltersFromDatabase: Boolean = true,
+    /**
+     * GPU preview fast-path (GPU M1, #146). When true, interactive preview
+     * renders (`simulate_preview` only — export always stays on the exact CPU
+     * engine) run the scan stage's spectral integral on the GPU via Vulkan
+     * compute, after a one-time on-device self-check against the CPU engine;
+     * any failure falls back to the CPU per frame. Default false.
+     */
+    val gpuPreview: Boolean = false,
 )
 
 /** Max control points per tone-curve channel; mirrors SPK_TONE_MAX_PTS in spektra.h. */

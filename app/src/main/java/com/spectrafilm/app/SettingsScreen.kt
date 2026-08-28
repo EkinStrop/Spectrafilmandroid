@@ -72,6 +72,7 @@ fun SettingsScreen(
     var quality by remember { mutableIntStateOf(settings.exportQuality) }
     var keepGps by remember { mutableStateOf(settings.exportKeepGps) }
     var gpuPreview by remember { mutableStateOf(settings.gpuPreview) }
+    var gpuEngine by remember { mutableStateOf(settings.gpuEngine) }
 
     Column(
         Modifier
@@ -189,6 +190,27 @@ fun SettingsScreen(
                 Switch(
                     checked = gpuPreview,
                     onCheckedChange = { gpuPreview = it; settings.gpuPreview = it },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("GPU engine (Vulkan, experimental)", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Run the film simulation's scan stage on the GPU for interactive " +
+                            "previews — more accurate than the preview LUT and verified " +
+                            "against the CPU engine on this device at first use, with " +
+                            "automatic CPU fallback. Export always uses the exact CPU " +
+                            "engine. Applies on the next return to the editor.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = gpuEngine,
+                    onCheckedChange = { gpuEngine = it; settings.gpuEngine = it },
                 )
             }
         }

@@ -54,6 +54,19 @@ class AppSettings private constructor(private val prefs: SharedPreferences) {
         get() = prefs.getBoolean(KEY_GPU_PREVIEW, false)
         set(v) { prefs.edit().putBoolean(KEY_GPU_PREVIEW, v).apply() }
 
+    /**
+     * GPU ENGINE preview (Vulkan, GPU M1 #146) — distinct from [gpuPreview] (the
+     * GLES LUT loupe overlay above): the film simulation itself runs its scan
+     * stage on the GPU for interactive previews (~2e-6 from the CPU chain,
+     * tighter than the preview's 3D LUT at ~5e-5 — see PR #145). Preview-only:
+     * export always renders on the exact CPU engine. Guarded by a one-time
+     * on-device self-check with automatic CPU fallback. Default OFF until the
+     * on-device validation round (#147 session) signs it off.
+     */
+    var gpuEngine: Boolean
+        get() = prefs.getBoolean(KEY_GPU_ENGINE, false)
+        set(v) { prefs.edit().putBoolean(KEY_GPU_ENGINE, v).apply() }
+
     var theme: ThemeMode
         get() = runCatching { ThemeMode.valueOf(prefs.getString(KEY_THEME, ThemeMode.SYSTEM.name)!!) }
             .getOrDefault(ThemeMode.SYSTEM)
@@ -103,6 +116,7 @@ class AppSettings private constructor(private val prefs: SharedPreferences) {
     fun applyDefaultsTo(state: ParamsState, availableProfiles: List<String>) {
         state.outputColorSpace = defaultOutputColorSpace
         state.previewMaxSize = previewMaxSize
+        state.gpuEngine = gpuEngine
         if (defaultFilmProfile.isNotBlank() && defaultFilmProfile in availableProfiles) {
             state.filmProfile = defaultFilmProfile
         }
@@ -116,6 +130,7 @@ class AppSettings private constructor(private val prefs: SharedPreferences) {
         private const val KEY_SEEN_ONBOARDING = "seen_onboarding"
         private const val KEY_SEEN_EDITOR_COACH = "seen_editor_coach"
         private const val KEY_GPU_PREVIEW = "gpu_preview"
+        private const val KEY_GPU_ENGINE = "gpu_engine_preview"
         private const val KEY_THEME = "theme"
         private const val KEY_OUTPUT_CS = "output_color_space"
         private const val KEY_PREVIEW_MAX = "preview_max_size"

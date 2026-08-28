@@ -1139,6 +1139,9 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     // 6) scan(): density_cmy -> display RGB (output_color_space, CCTF per params).
     spk::ScanningParams sparams;
     sparams.scan_film = true;
+    // GPU preview fast-path (#146): set only when spk_simulate_preview latched
+    // allow_gpu_scan; scan() re-gates on frame eligibility + the self-check.
+    sparams.allow_gpu = (p->allow_gpu_scan != 0);
     sparams.output_color_space = p->output_color_space;
     sparams.output_cctf_encoding = (p->output_cctf_encoding != 0);
     // OPT-IN output gamut compression (scan_film route). Default kLegacyClip (0) keeps
@@ -1585,6 +1588,9 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     // 5) Scan the print (D50 viewing illuminant, print profile's dyes).
     spk::ScanningParams sparams;
     sparams.scan_film = false;
+    // GPU preview fast-path (#146): set only when spk_simulate_preview latched
+    // allow_gpu_scan; scan() re-gates on frame eligibility + the self-check.
+    sparams.allow_gpu = (p->allow_gpu_scan != 0);
     sparams.output_color_space = p->output_color_space;
     sparams.output_cctf_encoding = (p->output_cctf_encoding != 0);
     // OPT-IN output gamut compression (print route, same scan() position as scan_film).
@@ -1690,6 +1696,8 @@ void downscale_bilinear(const float* src, int sw, int sh,
 }  // namespace
 
 extern "C" {
+
+int spk_gpu_scan_state(void) { return spk::gpu_scan_preview_state(); }
 
 void spk_default_params(spk_params* p) {
     if (!p) return;
@@ -1982,6 +1990,16 @@ spk_status spk_simulate_preview(spk_engine* eng, const spk_image* in,
     if (pp.use_scanner_lut == 0) pp.use_scanner_lut = 1;
     if (pp.use_enlarger_lut == 0) pp.use_enlarger_lut = 1;
     if (pp.lut_resolution < 2) pp.lut_resolution = 17;
+    // GPU preview fast-path latch (#146): ONLY this preview entry translates the
+    // user's gpu_preview toggle into allow_gpu_scan. No in-tree caller sets the
+    // INTERNAL field anywhere else, spk_simulate_tap and spk_bake_cube_lut
+    // hard-zero it defensively, and the JNI marshaller starts from
+    // spk_default_params' memset — spk_simulate itself cannot clamp it because
+    // this preview entry funnels through it, so for direct C callers of
+    // spk_simulate the field's keep-0 contract is documented, not enforced
+    // (law revision #149: preview-only until option-B ships). When scan() engages the GPU it skips the scanner LUT forced on
+    // above entirely (the fp32 direct integral is tighter than the LUT).
+    if (pp.gpu_preview != 0) pp.allow_gpu_scan = 1;
     p = &pp;
     int max_size = p->preview_max_size > 0 ? p->preview_max_size : 640;
     int longest = in->width > in->height ? in->width : in->height;
@@ -2008,6 +2026,13 @@ spk_status spk_simulate_tap(spk_engine* eng, const spk_image* in,
                             const spk_params* p, const char* tap_name,
                             spk_image* out) {
     if (!out || !p || !tap_name || !in) return SPK_ERR_BAD_ARGS;
+
+    // Debug taps feed the parity harness: hard-zero the INTERNAL GPU latch so a
+    // raw C caller's allow_gpu_scan can never put GPU output into a tap
+    // (#146/#149 — same defensive posture as spk_bake_cube_lut).
+    spk_params tp = *p;
+    tp.allow_gpu_scan = 0;
+    p = &tp;
 
     std::string tap = tap_name;
     std::vector<float> log_raw, film_density_cmy, print_density_cmy, final_rgb;
@@ -2124,6 +2149,10 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     // field must be zeroed here individually; halation_active alone no longer
     // masters them.)
     spk_params bp = *p;
+    // GPU latch hard-zeroed (#146/#149): a baked LUT is export-grade data, so it
+    // must never render through the GPU regardless of what a raw C caller put in
+    // the INTERNAL allow_gpu_scan field.
+    bp.allow_gpu_scan = 0;
     bp.grain_active = 0;
     bp.halation_active = 0;
     bp.glare_active = 0;

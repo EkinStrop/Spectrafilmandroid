@@ -149,7 +149,25 @@ struct ScanningParams {
     double gamut_knee_threshold = 0.0;
     double gamut_knee_limit = 1.0;
     double gamut_knee_power = 6.0;
+
+    // GPU preview fast-path (GPU M1, #146; PREVIEW-ONLY BY LAW REVISION #149:
+    // export stays CPU until the option-B machinery ships). Default false — every
+    // parity test and every export render keeps the CPU path byte-identical. Set
+    // ONLY by spk_simulate_preview (from spk_params.gpu_preview, the user's
+    // Settings toggle). When true AND the frame is eligible (sRGB + CCTF on, no
+    // gamut compress / glare / BW correction / blur / unsharp, 81-band profile)
+    // AND the one-time on-device self-check passes, scan() runs the density->RGB
+    // chain through the Vulkan scan_spectral kernel (fp32, ~2e-6 vs the CPU
+    // chain per the PR #145 device probe — tighter than the preview's scanner
+    // LUT at ~5e-5) and skips the LUT entirely. ANY failure falls through to the
+    // unchanged CPU path.
+    bool allow_gpu = false;
 };
+
+// One-time GPU scan self-check state: 0 = not yet run, 1 = passed, 2 = failed
+// (GPU disabled for the session). For diagnostics/logging (JNI reads it via
+// spk_gpu_scan_state); scan() consults it internally.
+int gpu_scan_preview_state();
 
 // scan(): run the scanning stage on an (h x w x 3) row-major density_cmy image.
 //   in  : density_cmy, length w*h*3.

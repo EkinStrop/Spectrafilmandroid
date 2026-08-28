@@ -1,6 +1,35 @@
 # Spektrafilm Android — Session Handoff
 
-## Current state (2026-08-27 evening, AFK batch: #119 prep + full-app audit — PR #137)
+## Current state (2026-08-28, the GPU line opens: #127 resolved, M1 preview offload)
+
+- **Owner priority: GPU first** (supersedes the baseline-first ordering; #119 stays
+  open and wanted). **#127 RESOLVED**: route = Vulkan compute per-kernel; scope = full
+  GPU chain, gated per-kernel by on-device E3 measurement; **option B OPENED** — GPU
+  export sanctioned under the oracle-verified-on-your-device regime (#149 codifies the
+  law revision; CPU stays the parity ground truth + fallback forever). Tickets:
+  #146 (M1) → #147 (device measurements, owner's laptop session) → #148 (full-chain
+  preview) → #149 (GPU export).
+- **On-device numbers are in** (PR #145 merged + #147/PR #150 from the owner's laptop
+  sessions): scan 2.15e-06, filming 6.46e-06, printing 7.91e-07 worst-case `max_abs` —
+  all 15×+ inside the oracle bar, ×5 byte-identical; fp16 fails (~1e-2); full tables in
+  `docs/research/gpu-device-probe.md`.
+- **M1 (#146) implemented on this branch**: persistent two-kernel Vulkan host
+  (pipeline/buffers created once, grow-only, fence-reused; NaN guard folded into the
+  upload), a NEW `scan_spectral_lin.comp` linear variant (unclipped linear RGB out) so
+  unsharp/lens-blur/gamut/glare/non-sRGB frames offload too (production default
+  scanner unsharp (0.7,0.7) + print glare land on the linear path; glare composes as a
+  post-AXPY, M·(xyz+gI) = M·xyz + g(M·I)), preview-only latch
+  (`spk_params.gpu_preview` → `allow_gpu_scan`, set ONLY by `spk_simulate_preview`),
+  one-time on-device self-check (CPU engine = the reference; fail → CPU for the
+  session, JNI logs once), Settings → "GPU engine (Vulkan)" toggle (default OFF,
+  `AppSettings.gpuEngine` — distinct from the GLES loupe's `gpuPreview`), Android
+  build now compiles the host (`SPK_ENABLE_VULKAN=ON` in gradle; host test builds
+  stay stub; SRC sets gained `gpu/*.cpp`). Local gate `tests/test_gpu_host.cpp`
+  (SwiftShader + stub modes) ALL OK: export byte-ignores the toggle, ×3 warm-host
+  byte-identical, GPU preview ≤1e-4 of export or better than the LUT preview
+  (scan route: 7.6e-07 vs the LUT's 4.4e-05).
+
+## Prior state (2026-08-27 evening, AFK batch: #119 prep + full-app audit — PR #137)
 
 - **#119 agent-side prep SHIPPED**: manifest `<profileable android:shell>` (simpleperf on
   release builds), export start/duration logcat breadcrumbs, and

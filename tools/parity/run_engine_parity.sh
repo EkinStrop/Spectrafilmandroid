@@ -21,7 +21,7 @@ JOBS="${JOBS:-$( (nproc 2>/dev/null || sysctl -n hw.ncpu) )}"
 
 mkdir -p "$OUT"
 cd "$CPP"
-SRC=(spektra.cpp kernels/*.cpp io/*.cpp model/*.cpp profiles/*.cpp runtime/*.cpp runtime/stages/*.cpp)
+SRC=(spektra.cpp gpu/*.cpp kernels/*.cpp io/*.cpp model/*.cpp profiles/*.cpp runtime/*.cpp runtime/stages/*.cpp)
 DEF=(-DSPK_TEST_DIR="\"$CPP/tests\"")
 
 # The (test, argv) table, mirroring the workflow's build_run calls in order.

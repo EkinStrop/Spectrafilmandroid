@@ -236,6 +236,13 @@ class ParamsState {
     // --- Display / settings ---
     var previewMaxSize by mutableIntStateOf(640)
 
+    /**
+     * GPU engine preview (Vulkan, #146). Device/app-level setting seeded from
+     * AppSettings.gpuEngine (NOT preset/recipe state — loadFrom leaves it
+     * alone). Preview renders only; export ignores it inside the engine.
+     */
+    var gpuEngine by mutableStateOf(false)
+
     /** Reset to the engine defaults for the given profile pair. */
     fun loadFrom(p: SpektraParams) {
         filmProfile = p.filmProfile
@@ -427,6 +434,7 @@ class ParamsState {
             applyHanatos2025AdaptationSurface = adaptationSurface,
             spectralGaussianBlur = spectralGaussianBlur,
             previewMaxSize = previewMaxSizeOverride ?: previewMaxSize,
+            gpuPreview = gpuEngine,
         ),
         filmRender = FilmRenderingParams(
             densityCurveGamma = filmGammaFactor,

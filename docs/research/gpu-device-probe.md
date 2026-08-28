@@ -110,14 +110,95 @@ export implications — GPU stays preview-only.
    (exact composition, no shader change) — the raw `kXYZ_to_RGB` alone differs from the
    engine's default output path by up to ~1.5e-4 near black (the Mc off-diagonals ×
    the 12.92 CCTF slope), which *would* breach the tolerance.
-4. Caveats bounding the claim: one device, one driver (512.842.19), one kernel (the
-   scan integral — printing/filming integrals are the same op class but unmeasured),
-   BW/glare corrections and the spatial branch not in scope, and GPU NaN handling is
+4. Caveats bounding the claim: one device, one driver (512.842.19), BW/glare
+   corrections and the spatial branch not in scope, and GPU NaN handling is
    driver behaviour, not spec — guard it explicitly before any export-path use.
+   ~~One kernel (the scan integral)~~ — closed by the M2 measurement below
+   ([#147](https://github.com/thetechgeekko/Spektrafilm-android/issues/147)):
+   the filming and printing integrals are now measured on the same device and
+   sit inside the bar too, so **all three per-pixel pipeline integrals are
+   oracle-tolerance-accurate in fp32 on this device**.
+
+---
+
+# M2 — Filming + printing integrals (#147)
+
+*Same device and driver as above (SM-S948W / Adreno 840 / 512.842.19, re-verified in
+this run's `caps` capture). Captured 2026-08-27, repo commit `8d50c9e` + the
+`tools/gpu_probe/` M2 extension. Method: probe-local fp32 shaders `filming.comp` /
+`printing.comp` (engine sources byte-untouched) vs f64 CPU mirrors compiled without
+fast-math that replicate each shader 1:1 on the same fp32 tables. Tables are folded on
+the host through the engine's OWN builders (`build_filming_tc_lut`,
+`normalize_density_curves`, `compute_dir_couplers_matrix` + `np_interp_array`,
+`digest_printing_params` + `resolve_neutral_cc` + `compute_midgray_exposure_factor`),
+and — new over M1 — every run executes the REAL engine stage on-device and checks the
+fold in-binary: `CHAIN` (f64 mirror vs engine) and `SETUP` (engine vs committed golden,
+which must PASS the parity bar) replace M1's offline adversarial fold review. Profile
+`kodak_portra_400`; print paper `kodak_portra_endura`, natively-digested neutral CC
+(0, 51.43, 55.26) and midgray factor 0.8531.*
+
+## Filming — ProPhoto→tc/b → Mitchell-cubic tc_lut → log10 → density curves → DIR couplers
+
+The full pointwise filming chain (`expose` fused path + `develop` pointwise, the
+goldens' regime) in one fp32 kernel: 3×3 matrix + chromaticity clamp + tri2quad, the
+16-tap Mitchell-Netravali cubic over the 192×192×3 tc_lut, `log10(max(raw,0)+1e-10)`,
+the fp32 density-curve interp (n=256), and the pointwise DIR-coupler correction
+(silver@M + re-interpolation on the pre-DIR curves) — the two "likely suspect"
+interpolation sub-ops included.
+
+| case | npix | max_abs vs f64 | rms | det ×5 | notes |
+|---|---:|---:|---:|---|---|
+| golden (`scan_portra` input) | 4,096 | **1.22e-06** | **1.03e-07** | IDENTICAL | vs committed golden: 1.28e-06 / 1.18e-07 — **78× / 85× inside** the bar |
+| sweep (64³ RGB lattice, −0.05..2.0 per ch) | 262,144 | **6.46e-06** | **1.33e-07** | IDENTICAL | worst at the high-red LUT corner; vs engine 6.26e-06 — **15× inside** |
+| NaN input | 3 | — | — | — | GPU emits **(0,0,0)**, byte-matching the f64 mirror (the `b = NaN→0` guard + the probe shader's bounded cubic index make NaN input well-defined; the ENGINE's own cubic has no defined NaN-input semantics) |
+
+`CHAIN` (f64 mirror vs engine, golden input): max_abs **2.46e-07** — the fold (fp32
+tables + fp32 input cast) costs under 3e-7 against the engine's f64 chain. `SETUP`
+(engine vs golden): 2.38e-07, PASS.
+
+## Printing — film CMY → 81-band dichroic-filtered integral → midgray → paper curves
+
+`print_expose`'s direct spectral path (81-band `10^-(cmy·dye)` against a folded
+`10^-base × filtered-illuminant × print-sensitivity` table, midgray factor, the
+verbatim `10^lr → log10` round trip) + `print_develop`'s paper density-curve interp
+(n=256), one fp32 kernel. 20 of 81 bands NaN-nulled (same fold rule as the M1 scan).
+
+| case | npix | max_abs vs f64 | rms | det ×5 | notes |
+|---|---:|---:|---:|---|---|
+| golden (`print_portra` film density) | 4,096 | **5.92e-07** | **9.79e-08** | IDENTICAL | vs committed golden: 5.96e-07 / 9.64e-08 — **168× / 104× inside** the bar |
+| sweep (64³ CMY lattice, −0.1..nanmax per ch) | 262,144 | **7.91e-07** | **9.11e-08** | IDENTICAL | vs engine 8.34e-07 — **120× inside** |
+| NaN density | 3 | — | — | — | GPU output **byte-matches the engine's defined semantics** (light = NaN→0 ⇒ near-black paper base) to the last printed digit — again via Adreno's `max(NaN,0)→0`, driver behaviour, not spec |
+
+`CHAIN`: max_abs **1.62e-07**. `SETUP`: 2.38e-07, PASS.
+
+## M2 precision brackets (same runs, recompiled shaders)
+
+| variant | filming sweep max_abs | printing sweep max_abs | verdict |
+|---|---:|---:|---|
+| `precise` (NoContraction on the main accumulators) | 6.46e-06 | 7.91e-07 | **byte-identical outputs to the default compile** on both kernels — same as the M1 scan finding |
+| `mediump` (RelaxedPrecision; driver evaluates fp16) | 6.09e-02 | 5.01e-03 | **~600× / ~50× OUTSIDE tolerance** — fp16 fails the oracle regime on both kernels (still deterministic ×5); proxy-preview-only material |
+
+## What M2 adds to the picture
+
+1. **Every per-pixel integral of the pipeline (filming, printing, scan) is now
+   measured on-device and sits inside the oracle bar in fp32 with ≥15× margin**,
+   deterministic across repeated dispatches. The #147 contingency (“if a kernel lands
+   outside, cut M3/M4 scope to the ones that pass”) is moot — nothing landed outside.
+2. The feared sub-ops — the density-curve LUT lookups and the DIR-coupler
+   interpolation — cost nothing measurable beyond the pure exp10 integrals: filming's
+   worst case (6.5e-06) is dominated by the cubic-LUT/chromaticity path at a sweep
+   corner, not the interps, and printing (which shares the scan's op class plus the
+   curve interp) is actually *tighter* than the scan sweep.
+3. The in-binary `CHAIN`/`SETUP` checks pin the folds to ≤2.5e-07 of the real engine
+   and prove the probe's digested parameters reproduce the committed goldens — the
+   M1-style fold-equivalence argument is now a measured number, not a review.
+4. Spatial branches (halation, diffusion, grain), preflash, morph and the enlarger
+   LUT remain out of scope, as does every non-Adreno-840 device.
 
 *Probe: `tools/gpu_probe/` (`build_push_run.sh` reproduces everything; raw captures in
 `tools/gpu_probe/captures/`, untracked). Research for
 [#127](https://github.com/thetechgeekko/Spektrafilm-android/issues/127) /
-[#135](https://github.com/thetechgeekko/Spektrafilm-android/issues/135), part of map
+[#135](https://github.com/thetechgeekko/Spektrafilm-android/issues/135) /
+[#147](https://github.com/thetechgeekko/Spektrafilm-android/issues/147), part of map
 [#117](https://github.com/thetechgeekko/Spektrafilm-android/issues/117). Film modeling
 powered by spektrafilm (GPLv3).*

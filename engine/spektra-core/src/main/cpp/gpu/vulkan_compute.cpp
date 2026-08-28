@@ -185,7 +185,7 @@ struct Ctx {
         mai.allocationSize = req.size;
         mai.memoryTypeIndex = (uint32_t)mt;
         if (vkAllocateMemory(device, &mai, nullptr, &b.mem) != VK_SUCCESS) return false;
-        vkBindBufferMemory(device, b.buf, b.mem, 0);
+        if (vkBindBufferMemory(device, b.buf, b.mem, 0) != VK_SUCCESS) return false;
         if (vkMapMemory(device, b.mem, 0, VK_WHOLE_SIZE, 0, &b.mapped) != VK_SUCCESS) return false;
         b.cap = bytes;
         return true;
@@ -429,6 +429,14 @@ static bool dispatch_scan(Ctx& c, Ctx::Kernel& s, const uint32_t* spv, size_t sp
     bool ok = false;
 
     do {
+        // Dispatch geometry up front, refusing anything past the
+        // spec-guaranteed maxComputeWorkGroupCount floor (65535 in x):
+        // dispatching more groups is invalid usage that could return true over
+        // garbage. 65535 * 64 = ~4.19M px — beyond every in-app preview, so
+        // past it the CPU path simply takes over.
+        const uint32_t groups = (npix + 63u) / 64u;
+        if (groups > 65535u) break;
+
         if (!s.pipelineReady && !build_scan_pipeline(c, s, spv, spvBytes)) break;
 
         // Grow-only image buffers; fixed-size tables. Any (re)creation requires a
@@ -478,10 +486,10 @@ static bool dispatch_scan(Ctx& c, Ctx::Kernel& s, const uint32_t* spv, size_t sp
         // Record + submit. The command buffer is reused; the fence wait below
         // (before return, success or not) guarantees it is never reset while
         // pending.
-        vkResetCommandBuffer(s.cmd, 0);
+        if (vkResetCommandBuffer(s.cmd, 0) != VK_SUCCESS) break;
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(s.cmd, &bi);
+        if (vkBeginCommandBuffer(s.cmd, &bi) != VK_SUCCESS) break;
         vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipe);
         vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pl, 0, 1, &s.dset, 0, nullptr);
         ScanPush push{};
@@ -491,15 +499,17 @@ static bool dispatch_scan(Ctx& c, Ctx::Kernel& s, const uint32_t* spv, size_t sp
         push.m[4] = xyz2rgb[3]; push.m[5] = xyz2rgb[4]; push.m[6]  = xyz2rgb[5]; push.m[7]  = 0.0f;
         push.m[8] = xyz2rgb[6]; push.m[9] = xyz2rgb[7]; push.m[10] = xyz2rgb[8]; push.m[11] = 0.0f;
         vkCmdPushConstants(s.cmd, s.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ScanPush), &push);
-        vkCmdDispatch(s.cmd, (npix + 63u) / 64u, 1, 1);
-        vkEndCommandBuffer(s.cmd);
+        vkCmdDispatch(s.cmd, groups, 1, 1);
+        if (vkEndCommandBuffer(s.cmd) != VK_SUCCESS) break;
 
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &s.cmd;
         if (vkQueueSubmit(c.queue, 1, &si, s.fence) != VK_SUCCESS) break;
         if (vkWaitForFences(c.device, 1, &s.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) break;
-        vkResetFences(c.device, 1, &s.fence);
+        // A failed reset would leave the fence signaled and a later wait
+        // vacuous — treat it as a real failure (teardown + CPU fallback).
+        if (vkResetFences(c.device, 1, &s.fence) != VK_SUCCESS) break;
 
         // Read back (persistently mapped, HOST_COHERENT).
         std::memcpy(rgb, s.out.mapped, imgBytes);

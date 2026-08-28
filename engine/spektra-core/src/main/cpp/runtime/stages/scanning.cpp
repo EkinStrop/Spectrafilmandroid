@@ -227,13 +227,18 @@ bool gpu_scan_self_check(const Profile& film) {
                                      t.dye.data(), t.icmf.data(), t.m_engine))
             break;
 
+        // NaN-aware compare: `d > max_abs` is false for NaN, so without the
+        // explicit check a driver emitting NaN would sail through the gate.
         double max_abs = 0.0;
+        bool any_nan = false;
         for (size_t k = 0; k < gpu.size(); ++k) {
-            const double d = std::fabs(static_cast<double>(gpu[k]) -
-                                       static_cast<double>(cpu[k]));
+            const double g = static_cast<double>(gpu[k]);
+            const double r = static_cast<double>(cpu[k]);
+            if (std::isnan(g) || std::isnan(r)) { any_nan = true; break; }
+            const double d = std::fabs(g - r);
             if (d > max_abs) max_abs = d;
         }
-        if (max_abs > 1e-4) break;
+        if (any_nan || max_abs > 1e-4) break;
 
         // LINEAR-kernel sub-check: same lattice vs an f64 mirror of the linear
         // chain over the SAME folded tables (KEEP IN SYNC with
@@ -266,12 +271,14 @@ bool gpu_scan_self_check(const Profile& film) {
                 const double ref = t.m_space[r * 3 + 0] * X +
                                    t.m_space[r * 3 + 1] * Y +
                                    t.m_space[r * 3 + 2] * Z;
-                const double d = std::fabs(
-                    static_cast<double>(glin[static_cast<size_t>(p) * 3 + r]) - ref);
+                const double g =
+                    static_cast<double>(glin[static_cast<size_t>(p) * 3 + r]);
+                if (std::isnan(g) || std::isnan(ref)) { lin_max = INFINITY; break; }
+                const double d = std::fabs(g - ref);
                 if (d > lin_max) lin_max = d;
             }
         }
-        ok = lin_max <= 1e-4;
+        ok = lin_max <= 1e-4;  // INFINITY (a NaN seen) fails the gate
     } while (false);
 
     g_gpu_scan_state.store(ok ? 1 : 2, std::memory_order_release);

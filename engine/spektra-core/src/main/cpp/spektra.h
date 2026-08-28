@@ -271,7 +271,9 @@ typedef struct {
      *     that frame (see runtime/stages/scanning.h ScanningParams::allow_gpu).
      *   allow_gpu_scan: INTERNAL. Set by spk_simulate_preview from gpu_preview;
      *     every other caller leaves it 0 (spk_default_params zeroes it, the JNI
-     *     marshaller never writes it). */
+     *     marshaller never writes it, and spk_simulate_tap / spk_bake_cube_lut
+     *     hard-zero it defensively). spk_simulate honours it because the preview
+     *     entry funnels through it — direct C callers must keep it 0. */
     int32_t gpu_preview;               /* bool (wired: preview-only GPU offload toggle) */
     int32_t allow_gpu_scan;            /* INTERNAL: preview-entry latch, keep 0 */
 

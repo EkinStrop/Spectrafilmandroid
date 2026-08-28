@@ -1991,10 +1991,13 @@ spk_status spk_simulate_preview(spk_engine* eng, const spk_image* in,
     if (pp.use_enlarger_lut == 0) pp.use_enlarger_lut = 1;
     if (pp.lut_resolution < 2) pp.lut_resolution = 17;
     // GPU preview fast-path latch (#146): ONLY this preview entry translates the
-    // user's gpu_preview toggle into allow_gpu_scan — spk_simulate (export) and
-    // spk_simulate_tap never set it, so the CPU export/parity surface cannot
-    // reach the GPU branch (law revision #149: preview-only until option-B
-    // ships). When scan() engages the GPU it skips the scanner LUT forced on
+    // user's gpu_preview toggle into allow_gpu_scan. No in-tree caller sets the
+    // INTERNAL field anywhere else, spk_simulate_tap and spk_bake_cube_lut
+    // hard-zero it defensively, and the JNI marshaller starts from
+    // spk_default_params' memset — spk_simulate itself cannot clamp it because
+    // this preview entry funnels through it, so for direct C callers of
+    // spk_simulate the field's keep-0 contract is documented, not enforced
+    // (law revision #149: preview-only until option-B ships). When scan() engages the GPU it skips the scanner LUT forced on
     // above entirely (the fp32 direct integral is tighter than the LUT).
     if (pp.gpu_preview != 0) pp.allow_gpu_scan = 1;
     p = &pp;
@@ -2023,6 +2026,13 @@ spk_status spk_simulate_tap(spk_engine* eng, const spk_image* in,
                             const spk_params* p, const char* tap_name,
                             spk_image* out) {
     if (!out || !p || !tap_name || !in) return SPK_ERR_BAD_ARGS;
+
+    // Debug taps feed the parity harness: hard-zero the INTERNAL GPU latch so a
+    // raw C caller's allow_gpu_scan can never put GPU output into a tap
+    // (#146/#149 — same defensive posture as spk_bake_cube_lut).
+    spk_params tp = *p;
+    tp.allow_gpu_scan = 0;
+    p = &tp;
 
     std::string tap = tap_name;
     std::vector<float> log_raw, film_density_cmy, print_density_cmy, final_rgb;
@@ -2139,6 +2149,10 @@ spk_status spk_bake_cube_lut(spk_engine* eng, const spk_params* p, int lut_size,
     // field must be zeroed here individually; halation_active alone no longer
     // masters them.)
     spk_params bp = *p;
+    // GPU latch hard-zeroed (#146/#149): a baked LUT is export-grade data, so it
+    // must never render through the GPU regardless of what a raw C caller put in
+    // the INTERNAL allow_gpu_scan field.
+    bp.allow_gpu_scan = 0;
     bp.grain_active = 0;
     bp.halation_active = 0;
     bp.glare_active = 0;

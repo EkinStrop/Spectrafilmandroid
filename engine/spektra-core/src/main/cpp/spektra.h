@@ -385,6 +385,13 @@ int spk_gpu_scan_state(void);
  * eligible frame yet; state 0 = never attempted. */
 uint64_t spk_gpu_scan_frames(void);
 
+/* Per-stage/per-filter wall-clock breakdown of the LAST render, formatted as
+ * "stage=ms other=ms ..." (non-zero stages only) into `buf` (capacity `cap`);
+ * returns bytes written. DIAGNOSTIC — reading the clock never changes output.
+ * The app logs this once per render so we can see where interactive latency
+ * goes (#146/#152). */
+int spk_stage_timings(char* buf, int cap);
+
 void spk_image_free(spk_image*);
 
 /* Debug taps (mirror DebugParams) for the golden-vector parity harness: dump an

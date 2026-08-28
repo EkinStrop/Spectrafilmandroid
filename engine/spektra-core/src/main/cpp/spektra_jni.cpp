@@ -699,6 +699,17 @@ JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
                                 "gpu scan path ACTIVE (eligible preview frames render on the GPU)");
         }
     }
+    // Per-stage/per-filter timing of this render (#146/#152): one line so the
+    // owner can see where the latency goes (grain/halation/filming vs scan, and
+    // the cold-start LUT bakes). Empty only if nothing ran.
+    {
+        char tbuf[512];
+        if (spk_stage_timings(tbuf, sizeof(tbuf)) > 0) {
+            __android_log_print(ANDROID_LOG_INFO, "Spektra",
+                                "stage timings ms [%s]: %s",
+                                preview ? "preview" : "export", tbuf);
+        }
+    }
 #endif
     if (st != SPK_OK) { throw_status(env, st); return nullptr; }
     if (!out.data) { throw_runtime(env, "spektra: engine returned no data"); return nullptr; }

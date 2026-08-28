@@ -56,6 +56,7 @@
 #include "runtime/color_reference.h"
 #include "runtime/params.h"
 #include "runtime/print_digest.h"
+#include "runtime/stage_timer.h"
 #include "runtime/stages/autoexposure.h"
 #include "runtime/stages/crop_resize.h"
 #include "runtime/stages/filming.h"
@@ -940,7 +941,9 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     PreprocessedInput pin;
     int width = 0, height = 0;
     double resize_pixel_size_um = 0.0;
-    preprocess_geometry(in, p, &pin, &width, &height, &resize_pixel_size_um);
+    spk::stage_timings_reset();  // per-render diagnostic (#146/#152); observation only
+    { spk::ScopedStage _t(spk::STG_PREPROCESS);
+      preprocess_geometry(in, p, &pin, &width, &height, &resize_pixel_size_um); }
     const int npix = width * height;
     if (out_w) *out_w = width;
     if (out_h) *out_h = height;
@@ -1021,6 +1024,7 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     //    (see engine_tc_lut / the spk_engine cache note).
     const spk::NdArray* tc_lut_ptr = nullptr;
     try {
+        spk::ScopedStage _t(spk::STG_TC_LUT);  // cold-start heavy (#152)
         tc_lut_ptr = &engine_tc_lut(eng, p->film_profile, film, p->spectral_gaussian_blur,
                                     p->apply_hanatos_window != 0,
                                     p->apply_hanatos_surface != 0,
@@ -1203,7 +1207,9 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     PreprocessedInput pin;
     int width = 0, height = 0;
     double resize_pixel_size_um = 0.0;
-    preprocess_geometry(in, p, &pin, &width, &height, &resize_pixel_size_um);
+    spk::stage_timings_reset();  // per-render diagnostic (#146/#152); observation only
+    { spk::ScopedStage _t(spk::STG_PREPROCESS);
+      preprocess_geometry(in, p, &pin, &width, &height, &resize_pixel_size_um); }
     const int npix = width * height;
     if (out_w) *out_w = width;
     if (out_h) *out_h = height;
@@ -1231,6 +1237,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     //    rebuilding (see engine_tc_lut / the spk_engine cache note).
     const spk::NdArray* tc_lut_ptr = nullptr;
     try {
+        spk::ScopedStage _t(spk::STG_TC_LUT);  // cold-start heavy (#152)
         tc_lut_ptr = &engine_tc_lut(eng, p->film_profile, film, p->spectral_gaussian_blur,
                                     p->apply_hanatos_window != 0,
                                     p->apply_hanatos_surface != 0,
@@ -1257,6 +1264,7 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
         // Read neutral_print_filters.json via the asset abstraction (FS or AAsset),
         // then resolve from the in-memory bytes. A missing/unreadable asset yields
         // defaults {0,0,0}, mirroring the Python FileNotFoundError branch.
+        spk::ScopedStage _t(spk::STG_PRINT_DIGEST);
         std::vector<char> nf;
         if (spk_read_asset(eng, kNeutralFiltersRel, nf)) {
             spk::resolve_neutral_cc_string(std::string(nf.data(), nf.size()),
@@ -1288,10 +1296,11 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     // use it for the native midgray factor.
     spk::PrintingParams pparams = spk::digest_printing_params(
         neutral_cc, enl, /*exposure_factor_midgray=*/1.0, pg);
-    pparams.exposure_factor_midgray = spk::compute_midgray_exposure_factor(
-        film, prnt, tc_lut, pparams.filtered_illuminant, pg,
-        static_cast<double>(p->exposure_compensation_ev),
-        p->normalize_print_exposure != 0, p->print_exposure_compensation != 0);
+    { spk::ScopedStage _t(spk::STG_PRINT_DIGEST);
+      pparams.exposure_factor_midgray = spk::compute_midgray_exposure_factor(
+          film, prnt, tc_lut, pparams.filtered_illuminant, pg,
+          static_cast<double>(p->exposure_compensation_ev),
+          p->normalize_print_exposure != 0, p->print_exposure_compensation != 0); }
     // enlarger.print_exposure (default 1.0) multiplies the print exposure.
     pparams.print_exposure = p->print_exposure;
 
@@ -1700,6 +1709,10 @@ extern "C" {
 int spk_gpu_scan_state(void) { return spk::gpu_scan_preview_state(); }
 
 uint64_t spk_gpu_scan_frames(void) { return spk::gpu_scan_frames_rendered(); }
+
+int spk_stage_timings(char* buf, int cap) {
+    return spk::stage_timings_format(buf, cap);
+}
 
 void spk_default_params(spk_params* p) {
     if (!p) return;

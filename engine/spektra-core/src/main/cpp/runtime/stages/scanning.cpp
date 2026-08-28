@@ -26,6 +26,7 @@
 #include "kernels/lut3d.h"
 #include "kernels/lut3d_cache.h"
 #include "kernels/parallel.h"
+#include "runtime/stage_timer.h"
 #include "model/color_output.h"
 #include "model/conversions.h"
 #include "model/emulsion.h"
@@ -301,6 +302,7 @@ uint64_t gpu_scan_frames_rendered() {
 
 void scan(const Profile& film, const ScanningParams& params,
           const float* density_cmy, int width, int height, float* rgb_out) {
+    ScopedStage _t_scan(STG_SCAN);  // whole stage (diagnostic; #146/#152)
     const int npix = width * height;
     const int S = film.n_samples;  // == kSpectralSamples (81) for bundled profiles
 
@@ -728,6 +730,11 @@ void scan(const Profile& film, const ScanningParams& params,
         });
     }
     double* const lin_rgb = lin_buf.get();
+
+    // Scanner spatial branch (gamut compress + lens blur + unsharp) — a
+    // SUB-MEASURE of STG_SCAN. Unsharp is ON by the production defaults, so this
+    // is where the scan stage's own interactive cost concentrates (#146).
+    ScopedStage _t_spatial(STG_SCAN_SPATIAL);
 
     // OPT-IN output gamut compression, applied in the linear output space at the
     // oracle's position (scanning.py::_density_to_rgb: right after XYZ->RGB and

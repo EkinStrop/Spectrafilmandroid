@@ -19,6 +19,7 @@
 #include "kernels/exponential_filter.h"
 #include "kernels/parallel.h"
 #include "kernels/spectral_upsampling.h"
+#include "runtime/stage_timer.h"
 #include "model/couplers.h"
 #include "model/density_curves.h"
 #include "model/diffusion.h"
@@ -468,6 +469,7 @@ void expose_impl(const Src& src, int width, int height,
         !params.halation.active &&                   // halation gate
         params.bw_exposure_correction == 1.0;        // b/w correction gate
     if (pointwise_fused) {
+        ScopedStage _t(STG_FILMING_EXPOSE);
         parallel_for(0, npix, [&](int lo, int hi) {
             for (int p = lo; p < hi; ++p) {
                 double in[3];
@@ -494,6 +496,7 @@ void expose_impl(const Src& src, int width, int height,
     // only cost a ~288 MB memset at 12 MP (EXPORT_FASTPATH item 4).
     std::unique_ptr<double[]> raw_buf(new double[static_cast<size_t>(npix) * 3]);
     double* const raw = raw_buf.get();
+    { ScopedStage _t(STG_FILMING_EXPOSE);
     parallel_for(0, npix, [&](int lo, int hi) {
         for (int p = lo; p < hi; ++p) {
             double in[3];
@@ -505,7 +508,7 @@ void expose_impl(const Src& src, int width, int height,
             cubic_interp_lut_at_2d(tc_lut, tc.x * scale, tc.y * scale, rr);
             for (int c = 0; c < 3; ++c) raw[p * 3 + c] = rr[c] * b * exp_mult;
         }
-    });
+    }); }
 
     // Highlight boost (numba_boost_hightlights.boost_highlights), applied on the
     // float64 irradiance AFTER exposure compensation and BEFORE the diffusion filter
@@ -516,7 +519,8 @@ void expose_impl(const Src& src, int width, int height,
     // scatter/halation sigmas under deactivate_spatial_effects (params_builder.py),
     // never boost_ev, so the boost fires whenever boost_ev > 0. boost_ev == 0
     // (schema/UI default) is a strict identity -> default goldens stay bit-exact.
-    apply_highlight_boost(raw, width, height, params.halation);
+    { ScopedStage _t(STG_HIGHLIGHT_BOOST);
+      apply_highlight_boost(raw, width, height, params.halation); }
 
     // Camera optical diffusion filter (Black Pro-Mist family), applied on the
     // float64 irradiance AFTER the highlight boost and BEFORE lens blur /
@@ -527,6 +531,7 @@ void expose_impl(const Src& src, int width, int height,
     // is expressed by the digest zeroing .active, params_builder.py). No-op unless
     // active (schema default false), so default params stay bit-exact.
     if (params.diffusion_filter.active) {
+        ScopedStage _t(STG_DIFFUSION);
         apply_diffusion_filter_um(raw, width, height,
                                   params.diffusion_filter, params.pixel_size_um);
     }
@@ -544,6 +549,7 @@ void expose_impl(const Src& src, int width, int height,
         params.pixel_size_um > 0.0) {
         double sigma = params.lens_blur_um / params.pixel_size_um;
         if (sigma > 0.0) {
+            ScopedStage _t(STG_LENS_BLUR);
             double sg[3] = {sigma, sigma, sigma};
             gaussian_blur_per_channel_d(raw, width, height, 3, sg);
         }
@@ -555,6 +561,7 @@ void expose_impl(const Src& src, int width, int height,
     // digest_halation_params only when the spatial digest is on and the preset is
     // known), so the spatial-OFF goldens still skip it.
     if (params.halation.active) {
+        ScopedStage _t(STG_HALATION);
         apply_halation_um(raw, width, height, params.halation,
                           params.pixel_size_um);
     }
@@ -605,26 +612,29 @@ void develop(const float* log_raw, int width, int height, const Profile& film,
     normalize_density_curves(film.density_curves.data(), n, ndc.data());
 
     // density_cmy = interpolate_exposure_to_density(log_raw, ndc, le, gamma)
-    interpolate_exposure_to_density(log_raw, npix, ndc.data(),
-                                    film.log_exposure.data(), n,
-                                    params.density_curve_gamma, density_cmy_out);
+    { ScopedStage _t(STG_DEVELOP);
+      interpolate_exposure_to_density(log_raw, npix, ndc.data(),
+                                      film.log_exposure.data(), n,
+                                      params.density_curve_gamma, density_cmy_out); }
 
     // apply_density_correction_dir_couplers. The spatial variant diffuses the
     // inhibitor correction (Gaussian + exponential tail); it self-gates and
     // delegates to the pointwise path when diffusion_size_um == 0 (the digest
     // zeroes the size when the spatial digest is off, mirroring the oracle's
     // deactivate_spatial_effects).
-    apply_density_correction_dir_couplers_spatial(
-        density_cmy_out, width, height, log_raw, film.log_exposure.data(),
-        ndc.data(), n, params.dir_couplers, film.is_positive(),
-        params.density_curve_gamma,
-        params.pixel_size_um, density_cmy_out);
+    { ScopedStage _t(STG_DIR_COUPLERS);
+      apply_density_correction_dir_couplers_spatial(
+          density_cmy_out, width, height, log_raw, film.log_exposure.data(),
+          ndc.data(), n, params.dir_couplers, film.is_positive(),
+          params.density_curve_gamma,
+          params.pixel_size_um, density_cmy_out); }
 
     // Stochastic grain (AgX particle model). Identity unless grain.active (set by
     // digest_grain_params when grain_active && stochastic effects are on). The
     // model operates on the post-coupler density_cmy, mirroring emulsion.py::
     // develop, which calls apply_grain after apply_density_correction_dir_couplers.
     if (params.grain.active) {
+        ScopedStage _t(STG_GRAIN);
         GrainParams grain = params.grain;
         // The sublayer path is selected when sublayers_active AND the profile
         // actually carries density_curves_layers; otherwise fall back to the

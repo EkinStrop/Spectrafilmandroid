@@ -243,6 +243,13 @@ class ParamsState {
      */
     var gpuEngine by mutableStateOf(false)
 
+    /**
+     * EXPERIMENTAL GPU export (Vulkan, #154). Device/app-level setting seeded
+     * from AppSettings.gpuExportEngine (NOT preset/recipe state). Applies to
+     * full-resolution exports; independent of [gpuEngine].
+     */
+    var gpuExport by mutableStateOf(false)
+
     /** Reset to the engine defaults for the given profile pair. */
     fun loadFrom(p: SpektraParams) {
         filmProfile = p.filmProfile
@@ -435,6 +442,7 @@ class ParamsState {
             spectralGaussianBlur = spectralGaussianBlur,
             previewMaxSize = previewMaxSizeOverride ?: previewMaxSize,
             gpuPreview = gpuEngine,
+            gpuExport = gpuExport,
         ),
         filmRender = FilmRenderingParams(
             densityCurveGamma = filmGammaFactor,

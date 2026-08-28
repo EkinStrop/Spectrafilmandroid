@@ -275,7 +275,15 @@ typedef struct {
      *     hard-zero it defensively). spk_simulate honours it because the preview
      *     entry funnels through it — direct C callers must keep it 0. */
     int32_t gpu_preview;               /* bool (wired: preview-only GPU offload toggle) */
-    int32_t allow_gpu_scan;            /* INTERNAL: preview-entry latch, keep 0 */
+    /* EXPERIMENTAL GPU export (GPU M4 seed, #149 option B). Default 0. When set,
+     * spk_simulate (export) routes the scan stage through the GPU under the SAME
+     * one-time on-device self-check as the preview path — "oracle-verified on
+     * your device": the CPU engine stays the ground truth and the automatic
+     * per-frame fallback. Full-res exports are dispatched in slices (the host
+     * handles > 4.19M px). spk_simulate_tap / spk_bake_cube_lut still force the
+     * CPU path. Off by default, so a plain export is byte-identical to today. */
+    int32_t gpu_export;                /* bool (wired: experimental GPU export) */
+    int32_t allow_gpu_scan;            /* INTERNAL: preview/export entry latch, keep 0 */
 
     /* --- gamut compression (opt-in; both default to the byte-identical sentinel) ---
      * Ordinals mirror model/gamut_compression.h's enum classes EXACTLY:
@@ -378,6 +386,19 @@ spk_status spk_simulate_preview(spk_engine*, const spk_image* in, const spk_para
  * 2 = failed (GPU preview disabled for this process). Meaningful only when the
  * library was built with SPK_ENABLE_VULKAN and gpu_preview was enabled. */
 int spk_gpu_scan_state(void);
+
+/* Frames actually rendered through a GPU kernel this process (0 = the GPU scan
+ * path never engaged). With spk_gpu_scan_state this makes the toggle externally
+ * verifiable: state 1 + frames > 0 = active; state 1 + frames 0 = passed but no
+ * eligible frame yet; state 0 = never attempted. */
+uint64_t spk_gpu_scan_frames(void);
+
+/* Per-stage/per-filter wall-clock breakdown of the LAST render, formatted as
+ * "stage=ms other=ms ..." (non-zero stages only) into `buf` (capacity `cap`);
+ * returns bytes written. DIAGNOSTIC — reading the clock never changes output.
+ * The app logs this once per render so we can see where interactive latency
+ * goes (#146/#152). */
+int spk_stage_timings(char* buf, int cap);
 
 void spk_image_free(spk_image*);
 

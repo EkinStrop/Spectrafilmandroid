@@ -498,6 +498,9 @@ bool marshal_params(JNIEnv* env, jobject params, spk_params* out, ParamStorage* 
         // GPU preview fast-path toggle (GPU M1, #146; default false). Consulted
         // only by spk_simulate_preview — export renders ignore it by design.
         out->gpu_preview = call_bool(env, settings, "getGpuPreview") ? 1 : 0;
+        // Experimental GPU export toggle (#154; default false). Consulted only by
+        // spk_simulate (export); preview clears it, tap/bake hard-zero the latch.
+        out->gpu_export = call_bool(env, settings, "getGpuExport") ? 1 : 0;
         out->lut_resolution = call_int(env, settings, "getLutResolution");
         out->preview_max_size = call_int(env, settings, "getPreviewMaxSize");
         out->neutral_print_filters_from_database =
@@ -676,12 +679,38 @@ JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
     // preview silently stays on the CPU path for this process (#146 mandate —
     // fall back, but never silently for the log).
     if (preview) {
-        static bool gpu_fail_logged = false;
-        if (!gpu_fail_logged && spk_gpu_scan_state() == 2) {
-            gpu_fail_logged = true;
-            __android_log_print(ANDROID_LOG_WARN, "Spektra",
-                                "gpu preview self-check FAILED on this device/driver; "
-                                "previews stay on the CPU path this session");
+        // One-time logs so the toggle is externally verifiable from logcat
+        // (#146 on-device validation found silence was ambiguous: only the
+        // failure case logged, so "passed" and "never ran" looked identical).
+        static bool gpu_state_logged = false;
+        const int gpu_state = spk_gpu_scan_state();
+        if (!gpu_state_logged && gpu_state != 0) {
+            gpu_state_logged = true;
+            if (gpu_state == 1) {
+                __android_log_print(ANDROID_LOG_INFO, "Spektra",
+                                    "gpu preview self-check PASSED on this device/driver");
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "Spektra",
+                                    "gpu preview self-check FAILED on this device/driver; "
+                                    "previews stay on the CPU path this session");
+            }
+        }
+        static bool gpu_engaged_logged = false;
+        if (!gpu_engaged_logged && spk_gpu_scan_frames() > 0) {
+            gpu_engaged_logged = true;
+            __android_log_print(ANDROID_LOG_INFO, "Spektra",
+                                "gpu scan path ACTIVE (eligible preview frames render on the GPU)");
+        }
+    }
+    // Per-stage/per-filter timing of this render (#146/#152): one line so the
+    // owner can see where the latency goes (grain/halation/filming vs scan, and
+    // the cold-start LUT bakes). Empty only if nothing ran.
+    {
+        char tbuf[512];
+        if (spk_stage_timings(tbuf, sizeof(tbuf)) > 0) {
+            __android_log_print(ANDROID_LOG_INFO, "Spektra",
+                                "stage timings ms [%s]: %s",
+                                preview ? "preview" : "export", tbuf);
         }
     }
 #endif

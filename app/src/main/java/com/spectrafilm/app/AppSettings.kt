@@ -67,6 +67,18 @@ class AppSettings private constructor(private val prefs: SharedPreferences) {
         get() = prefs.getBoolean(KEY_GPU_ENGINE, false)
         set(v) { prefs.edit().putBoolean(KEY_GPU_ENGINE, v).apply() }
 
+    /**
+     * EXPERIMENTAL GPU export (Vulkan, #154 — GPU M4 seed / #149 option B):
+     * the film simulation's scan stage runs on the GPU for FULL-RESOLUTION
+     * exports, not just previews. "Oracle-verified on your device" — the same
+     * on-device self-check gates it, and the CPU engine stays the ground truth
+     * and automatic fallback. Default OFF; a plain export is byte-identical to
+     * the CPU path. Independent of [gpuEngine] (the preview toggle).
+     */
+    var gpuExportEngine: Boolean
+        get() = prefs.getBoolean(KEY_GPU_EXPORT, false)
+        set(v) { prefs.edit().putBoolean(KEY_GPU_EXPORT, v).apply() }
+
     var theme: ThemeMode
         get() = runCatching { ThemeMode.valueOf(prefs.getString(KEY_THEME, ThemeMode.SYSTEM.name)!!) }
             .getOrDefault(ThemeMode.SYSTEM)
@@ -117,6 +129,7 @@ class AppSettings private constructor(private val prefs: SharedPreferences) {
         state.outputColorSpace = defaultOutputColorSpace
         state.previewMaxSize = previewMaxSize
         state.gpuEngine = gpuEngine
+        state.gpuExport = gpuExportEngine
         if (defaultFilmProfile.isNotBlank() && defaultFilmProfile in availableProfiles) {
             state.filmProfile = defaultFilmProfile
         }
@@ -131,6 +144,7 @@ class AppSettings private constructor(private val prefs: SharedPreferences) {
         private const val KEY_SEEN_EDITOR_COACH = "seen_editor_coach"
         private const val KEY_GPU_PREVIEW = "gpu_preview"
         private const val KEY_GPU_ENGINE = "gpu_engine_preview"
+        private const val KEY_GPU_EXPORT = "gpu_engine_export"
         private const val KEY_THEME = "theme"
         private const val KEY_OUTPUT_CS = "output_color_space"
         private const val KEY_PREVIEW_MAX = "preview_max_size"

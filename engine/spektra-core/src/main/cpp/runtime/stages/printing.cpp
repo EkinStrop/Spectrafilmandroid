@@ -21,6 +21,7 @@
 #include "kernels/lut3d.h"
 #include "kernels/lut3d_cache.h"
 #include "kernels/parallel.h"
+#include "runtime/stage_timer.h"
 #include "model/density_curves.h"
 #include "model/diffusion.h"
 #include "model/morph_curves.h"
@@ -81,6 +82,7 @@ void cmy_to_print_log_raw_fn(const double in[3], double out[3], void* vctx) {
 void print_expose(const Profile& film, const Profile& print_profile,
                   const PrintingParams& params, const float* density_cmy,
                   int width, int height, float* log_raw_print_out) {
+    ScopedStage _t(STG_PRINT_EXPOSE);  // diagnostic (#146/#152)
     const int npix = width * height;
     const int S = film.n_samples;  // 81 for bundled profiles.
     const bool diffusion = params.diffusion_filter.active;

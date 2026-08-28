@@ -127,6 +127,31 @@ void run_case(spk_engine* eng, const spk_params& base, const char* label,
         check(bytes_eq(prev_cpu, g1),
               std::string(label) + ": no GPU => gpu_preview is a byte-identical no-op");
     }
+
+    // EXPERIMENTAL GPU export (#154): the export path also offloads under
+    // gpu_export. The CPU export (exp_a) is the oracle-verified reference.
+    spk_params exp_gpu_p = base;
+    exp_gpu_p.gpu_export = 1;
+    std::vector<float> exp_gpu;
+    if (!render(eng, exp_gpu_p, false, &exp_gpu)) return;
+    if (gpu_present) {
+        const double exp_band = max_abs(exp_gpu, exp_a);
+        std::printf("info %s: GPU-export-vs-CPU-export max_abs=%.3e\n", label, exp_band);
+        check(exp_band <= 1e-4,
+              std::string(label) + ": GPU export within 1e-4 of CPU export");
+        check(!bytes_eq(exp_gpu, exp_a),
+              std::string(label) + ": GPU export actually engaged");
+        // gpu_export must NOT leak into the preview path (independent toggles).
+        spk_params prev_exp_p = base;
+        prev_exp_p.gpu_export = 1;  // gpu_preview stays 0
+        std::vector<float> prev_exp;
+        if (render(eng, prev_exp_p, true, &prev_exp))
+            check(bytes_eq(prev_exp, prev_cpu),
+                  std::string(label) + ": gpu_export does not affect the preview path");
+    } else {
+        check(bytes_eq(exp_gpu, exp_a),
+              std::string(label) + ": no GPU => gpu_export is a byte-identical no-op");
+    }
 }
 
 void run_all(spk_engine* eng, bool gpu_present) {
@@ -171,7 +196,12 @@ int main(int argc, char** argv) {
         check(spk_gpu_scan_state() == 0, "self-check never ran without a GPU");
     } else {
         check(st == 1, "self-check passed (state == 1)");
+        check(spk_gpu_scan_frames() > 0,
+              "frames counter engaged (spk_gpu_scan_frames > 0)");
     }
+    if (st == 0)
+        check(spk_gpu_scan_frames() == 0,
+              "frames counter stays 0 without a GPU");
 
     std::printf(g_fail ? "test_gpu_host: FAIL\n" : "test_gpu_host: ALL OK\n");
     return g_fail;

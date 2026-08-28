@@ -24,6 +24,7 @@
 
 #ifdef __ANDROID__
 #include <android/asset_manager_jni.h>
+#include <android/log.h>
 #endif
 
 #include "spektra.h"
@@ -494,6 +495,9 @@ bool marshal_params(JNIEnv* env, jobject params, spk_params* out, ParamStorage* 
         out->spectral_gaussian_blur = call_float(env, settings, "getSpectralGaussianBlur");
         out->use_enlarger_lut = call_bool(env, settings, "getUseEnlargerLut") ? 1 : 0;
         out->use_scanner_lut = call_bool(env, settings, "getUseScannerLut") ? 1 : 0;
+        // GPU preview fast-path toggle (GPU M1, #146; default false). Consulted
+        // only by spk_simulate_preview — export renders ignore it by design.
+        out->gpu_preview = call_bool(env, settings, "getGpuPreview") ? 1 : 0;
         out->lut_resolution = call_int(env, settings, "getLutResolution");
         out->preview_max_size = call_int(env, settings, "getPreviewMaxSize");
         out->neutral_print_filters_from_database =
@@ -667,6 +671,20 @@ JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
     if (!preview) params.disable_buffer_memos = 1;
     spk_status st = preview ? spk_simulate_preview(eng, &in_img, &params, &out)
                             : spk_simulate(eng, &in_img, &params, &out);
+#ifdef __ANDROID__
+    // One-time diagnostic when the GPU preview self-check failed (state 2): the
+    // preview silently stays on the CPU path for this process (#146 mandate —
+    // fall back, but never silently for the log).
+    if (preview) {
+        static bool gpu_fail_logged = false;
+        if (!gpu_fail_logged && spk_gpu_scan_state() == 2) {
+            gpu_fail_logged = true;
+            __android_log_print(ANDROID_LOG_WARN, "Spektra",
+                                "gpu preview self-check FAILED on this device/driver; "
+                                "previews stay on the CPU path this session");
+        }
+    }
+#endif
     if (st != SPK_OK) { throw_status(env, st); return nullptr; }
     if (!out.data) { throw_runtime(env, "spektra: engine returned no data"); return nullptr; }
 

@@ -87,7 +87,7 @@ Compile a single test against the full source set (note `-pthread` is required f
 cd engine/spektra-core/src/main/cpp
 CPP=$(pwd)
 ASSET=../assets/spektra
-SRC="spektra.cpp kernels/*.cpp io/*.cpp model/*.cpp profiles/*.cpp runtime/*.cpp runtime/stages/*.cpp"
+SRC="spektra.cpp gpu/*.cpp kernels/*.cpp io/*.cpp model/*.cpp profiles/*.cpp runtime/*.cpp runtime/stages/*.cpp"
 g++ -std=c++17 -O2 -pthread -I. -I../../../../../tools/parity \
   -DSPK_TEST_DIR="\"$CPP/tests\"" \
   tests/test_simulate_e2e.cpp $SRC -o /tmp/test_simulate_e2e

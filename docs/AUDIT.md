@@ -53,11 +53,11 @@ App layer:
 - Eyedropper multi-sample still outstanding (`masks/Mask.kt`).
 
 Engine:
-- **Unwired subsystems' fate**: `gpu/vulkan_compute.*` is a *complete* headless Vulkan
-  compute impl (both kernels + vendored SPIR-V) with **zero call sites** (feeds #127);
-  `ml/segmentation.*` is a stub whose CMake option `SPK_ENABLE_LITERT` is a build trap
-  (`#error`); `kernels/half.cpp` ships dead in the .so and burns a CI slot
-  (PERF_ROADMAP #3 infra that never landed).
+- **Unwired subsystems' fate**: `gpu/vulkan_compute.*` is now WIRED (GPU M1, #146:
+  persistent two-kernel host driving the preview scan offload; the `cctf_encode`
+  kernel alone remains call-site-free); `ml/segmentation.*` is a stub whose CMake
+  option `SPK_ENABLE_LITERT` is a build trap (`#error`); `kernels/half.cpp` ships
+  dead in the .so and burns a CI slot (PERF_ROADMAP #3 infra that never landed).
 - `io/npy_lut.cpp` resizes to the header-declared shape **before** the truncated-payload
   bounds check (latent 8 TB-allocation path; bundled-only assets today). The two parsers
   (`json_min.h`, `npy_lut.cpp`) have no direct/negative tests; `model/glare.cpp` is

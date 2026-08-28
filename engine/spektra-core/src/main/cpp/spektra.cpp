@@ -1139,6 +1139,9 @@ spk_status run_scan_film(spk_engine* eng, const spk_image* in, const spk_params*
     // 6) scan(): density_cmy -> display RGB (output_color_space, CCTF per params).
     spk::ScanningParams sparams;
     sparams.scan_film = true;
+    // GPU preview fast-path (#146): set only when spk_simulate_preview latched
+    // allow_gpu_scan; scan() re-gates on frame eligibility + the self-check.
+    sparams.allow_gpu = (p->allow_gpu_scan != 0);
     sparams.output_color_space = p->output_color_space;
     sparams.output_cctf_encoding = (p->output_cctf_encoding != 0);
     // OPT-IN output gamut compression (scan_film route). Default kLegacyClip (0) keeps
@@ -1585,6 +1588,9 @@ spk_status run_print(spk_engine* eng, const spk_image* in, const spk_params* p,
     // 5) Scan the print (D50 viewing illuminant, print profile's dyes).
     spk::ScanningParams sparams;
     sparams.scan_film = false;
+    // GPU preview fast-path (#146): set only when spk_simulate_preview latched
+    // allow_gpu_scan; scan() re-gates on frame eligibility + the self-check.
+    sparams.allow_gpu = (p->allow_gpu_scan != 0);
     sparams.output_color_space = p->output_color_space;
     sparams.output_cctf_encoding = (p->output_cctf_encoding != 0);
     // OPT-IN output gamut compression (print route, same scan() position as scan_film).
@@ -1690,6 +1696,8 @@ void downscale_bilinear(const float* src, int sw, int sh,
 }  // namespace
 
 extern "C" {
+
+int spk_gpu_scan_state(void) { return spk::gpu_scan_preview_state(); }
 
 void spk_default_params(spk_params* p) {
     if (!p) return;
@@ -1982,6 +1990,13 @@ spk_status spk_simulate_preview(spk_engine* eng, const spk_image* in,
     if (pp.use_scanner_lut == 0) pp.use_scanner_lut = 1;
     if (pp.use_enlarger_lut == 0) pp.use_enlarger_lut = 1;
     if (pp.lut_resolution < 2) pp.lut_resolution = 17;
+    // GPU preview fast-path latch (#146): ONLY this preview entry translates the
+    // user's gpu_preview toggle into allow_gpu_scan — spk_simulate (export) and
+    // spk_simulate_tap never set it, so the CPU export/parity surface cannot
+    // reach the GPU branch (law revision #149: preview-only until option-B
+    // ships). When scan() engages the GPU it skips the scanner LUT forced on
+    // above entirely (the fp32 direct integral is tighter than the LUT).
+    if (pp.gpu_preview != 0) pp.allow_gpu_scan = 1;
     p = &pp;
     int max_size = p->preview_max_size > 0 ? p->preview_max_size : 640;
     int longest = in->width > in->height ? in->width : in->height;

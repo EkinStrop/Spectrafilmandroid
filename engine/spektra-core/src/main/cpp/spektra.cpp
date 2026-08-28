@@ -1699,6 +1699,8 @@ extern "C" {
 
 int spk_gpu_scan_state(void) { return spk::gpu_scan_preview_state(); }
 
+uint64_t spk_gpu_scan_frames(void) { return spk::gpu_scan_frames_rendered(); }
+
 void spk_default_params(spk_params* p) {
     if (!p) return;
     const char* film = p->film_profile;

@@ -169,6 +169,10 @@ struct ScanningParams {
 // spk_gpu_scan_state); scan() consults it internally.
 int gpu_scan_preview_state();
 
+// Frames actually rendered through a GPU kernel this process (0 = the path
+// never engaged). Observability only — see spk_gpu_scan_frames.
+uint64_t gpu_scan_frames_rendered();
+
 // scan(): run the scanning stage on an (h x w x 3) row-major density_cmy image.
 //   in  : density_cmy, length w*h*3.
 //   out : final RGB (sRGB, CCTF-encoded, clipped to [0,1]), length w*h*3.

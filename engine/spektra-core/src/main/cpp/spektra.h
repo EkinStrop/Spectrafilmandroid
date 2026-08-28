@@ -379,6 +379,12 @@ spk_status spk_simulate_preview(spk_engine*, const spk_image* in, const spk_para
  * library was built with SPK_ENABLE_VULKAN and gpu_preview was enabled. */
 int spk_gpu_scan_state(void);
 
+/* Frames actually rendered through a GPU kernel this process (0 = the GPU scan
+ * path never engaged). With spk_gpu_scan_state this makes the toggle externally
+ * verifiable: state 1 + frames > 0 = active; state 1 + frames 0 = passed but no
+ * eligible frame yet; state 0 = never attempted. */
+uint64_t spk_gpu_scan_frames(void);
+
 void spk_image_free(spk_image*);
 
 /* Debug taps (mirror DebugParams) for the golden-vector parity harness: dump an

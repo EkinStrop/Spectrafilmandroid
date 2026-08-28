@@ -676,12 +676,27 @@ JNI(jobject, nativeSimulate)(JNIEnv* env, jobject /*thiz*/, jlong handle,
     // preview silently stays on the CPU path for this process (#146 mandate —
     // fall back, but never silently for the log).
     if (preview) {
-        static bool gpu_fail_logged = false;
-        if (!gpu_fail_logged && spk_gpu_scan_state() == 2) {
-            gpu_fail_logged = true;
-            __android_log_print(ANDROID_LOG_WARN, "Spektra",
-                                "gpu preview self-check FAILED on this device/driver; "
-                                "previews stay on the CPU path this session");
+        // One-time logs so the toggle is externally verifiable from logcat
+        // (#146 on-device validation found silence was ambiguous: only the
+        // failure case logged, so "passed" and "never ran" looked identical).
+        static bool gpu_state_logged = false;
+        const int gpu_state = spk_gpu_scan_state();
+        if (!gpu_state_logged && gpu_state != 0) {
+            gpu_state_logged = true;
+            if (gpu_state == 1) {
+                __android_log_print(ANDROID_LOG_INFO, "Spektra",
+                                    "gpu preview self-check PASSED on this device/driver");
+            } else {
+                __android_log_print(ANDROID_LOG_WARN, "Spektra",
+                                    "gpu preview self-check FAILED on this device/driver; "
+                                    "previews stay on the CPU path this session");
+            }
+        }
+        static bool gpu_engaged_logged = false;
+        if (!gpu_engaged_logged && spk_gpu_scan_frames() > 0) {
+            gpu_engaged_logged = true;
+            __android_log_print(ANDROID_LOG_INFO, "Spektra",
+                                "gpu scan path ACTIVE (eligible preview frames render on the GPU)");
         }
     }
 #endif

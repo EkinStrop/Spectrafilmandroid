@@ -171,7 +171,12 @@ int main(int argc, char** argv) {
         check(spk_gpu_scan_state() == 0, "self-check never ran without a GPU");
     } else {
         check(st == 1, "self-check passed (state == 1)");
+        check(spk_gpu_scan_frames() > 0,
+              "frames counter engaged (spk_gpu_scan_frames > 0)");
     }
+    if (st == 0)
+        check(spk_gpu_scan_frames() == 0,
+              "frames counter stays 0 without a GPU");
 
     std::printf(g_fail ? "test_gpu_host: FAIL\n" : "test_gpu_host: ALL OK\n");
     return g_fail;

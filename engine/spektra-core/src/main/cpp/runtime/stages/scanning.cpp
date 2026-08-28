@@ -177,6 +177,10 @@ bool gpu_scan_eligible(const ScanningParams& p) {
 // the process; any failure (numeric OR dispatch) -> GPU off for the process,
 // state readable via gpu_scan_preview_state() so the JNI layer can log it.
 std::atomic<int> g_gpu_scan_state{0};  // 0 unchecked, 1 passed, 2 failed
+// Frames actually rendered through a GPU kernel this process (observability,
+// #146 on-device validation follow-up: self-check state alone cannot prove the
+// path ever ENGAGED — silence was indistinguishable from "never ran").
+std::atomic<uint64_t> g_gpu_scan_frames{0};
 
 bool gpu_scan_self_check(const Profile& film) {
     int st = g_gpu_scan_state.load(std::memory_order_acquire);
@@ -291,6 +295,10 @@ int gpu_scan_preview_state() {
     return g_gpu_scan_state.load(std::memory_order_acquire);
 }
 
+uint64_t gpu_scan_frames_rendered() {
+    return g_gpu_scan_frames.load(std::memory_order_relaxed);
+}
+
 void scan(const Profile& film, const ScanningParams& params,
           const float* density_cmy, int width, int height, float* rgb_out) {
     const int npix = width * height;
@@ -311,6 +319,7 @@ void scan(const Profile& film, const ScanningParams& params,
             spk::gpu::scan_spectral(density_cmy, rgb_out,
                                     static_cast<uint32_t>(npix), t.dye.data(),
                                     t.icmf.data(), t.m_engine)) {
+            g_gpu_scan_frames.fetch_add(1, std::memory_order_relaxed);
             // Tone curve post-pass: the CPU encode applies it on the same
             // display-referred, clipped values the GPU just produced. Inactive
             // (the default) is an identity, skipped.
@@ -435,6 +444,7 @@ void scan(const Profile& film, const ScanningParams& params,
         }
     }
     const bool gpu_lin_done = static_cast<bool>(lin_buf);
+    if (gpu_lin_done) g_gpu_scan_frames.fetch_add(1, std::memory_order_relaxed);
 
     // OPT-IN scanner 3D-LUT acceleration (params.use_lut, default false). Mirrors
     // scanning.py::_density_to_rgb routing the per-pixel cmy_to_log_xyz spectral

@@ -1,0 +1,172 @@
+#version 450
+// Spektrafilm for Android — GPU device probe: FILMING per-pixel kernel (#147 M2). GPLv3.
+// Film modeling powered by spektrafilm.
+//
+// PROBE-ONLY shader (lives under tools/, not engine/): fp32 port of the filming
+// stage's pointwise-fused per-pixel chain, exactly as the CPU engine evaluates it
+// under the parity-golden toggles (spatial + stochastic effects off, grain off):
+//
+//   runtime/stages/filming.cpp::expose (pointwise_fused branch)
+//     ProPhoto RGB -> XYZ (CAT02->D55, kProPhotoToXyzD55) -> (b, xy) -> tri2quad
+//     -> Mitchell-Netravali cubic 2D interp of the tc_lut (kernels/
+//        spectral_upsampling.cpp::cubic_interp_lut_at_2d)
+//     -> raw = rr * b * 2^ev -> log_raw = log10(max(raw,0)+1e-10)
+//   runtime/stages/filming.cpp::develop (pointwise)
+//     -> density = fast_interp(log_raw, log_exposure/gamma, normalized curves)
+//     -> DIR couplers (model/couplers.cpp, diffusion off): silver(+shift*s^2),
+//        log_raw0 = log_raw - silver@M, density = fast_interp(log_raw0, le/gamma, dc0)
+//
+// All tables are folded on the host through the ENGINE'S OWN builders
+// (build_filming_tc_lut, normalize_density_curves, compute_dir_couplers_matrix,
+// np_interp_array) and downcast to fp32; the f64 CPU reference
+// (ref_filming_f64.cpp) mirrors THIS shader 1:1 on the same fp32 tables.
+//
+// One deliberate deviation from the engine source: the cubic base index is
+// bounded (clamp into [0, L-2]) so a NaN coordinate cannot index out of bounds —
+// the engine's int(floor(NaN)) is undefined; here NaN inputs yield NaN output
+// through the fractional weight instead of an OOB read. Identical for every
+// non-NaN coordinate.
+#define WG 64
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly  buffer InBuf    { float rgb[];       };  // npix*3 linear ProPhoto
+layout(std430, binding = 1) writeonly buffer OutBuf   { float dens[];      };  // npix*3 film density CMY
+layout(std430, binding = 2) readonly  buffer TcLut    { float tc_lut[];    };  // L*L*3, [x][y][c]
+layout(std430, binding = 3) readonly  buffer DevAxis  { float dev_axis[];  };  // n*3 log_exposure/gamma (fp32, engine order)
+layout(std430, binding = 4) readonly  buffer DevCurve { float dev_curve[]; };  // n*3 normalized density curves
+layout(std430, binding = 5) readonly  buffer DirAxis  { float dir_axis[];  };  // n*3 log_exposure/gamma (couplers)
+layout(std430, binding = 6) readonly  buffer DirCurve { float dir_curve[]; };  // n*3 dc0 (pre-DIR curves)
+layout(push_constant) uniform Push {
+    uint  npix;
+    int   L;         // tc_lut edge (192)
+    int   n;         // density-curve points
+    float exp_mult;  // 2^exposure_compensation_ev (1.0 under goldens)
+    float shift;     // high_exposure_couplers_shift
+    float m[9];      // DIR couplers matrix, row-major (donor row, receiver col)
+} pc;
+
+// Mitchell-Netravali kernel, B = C = 1/3 (kernels/spectral_upsampling.cpp).
+float mitchell(float t) {
+    const float B = 1.0 / 3.0;
+    const float C = 1.0 / 3.0;
+    float x = abs(t);
+    if (x < 1.0)
+        return (1.0 / 6.0) * ((12.0 - 9.0 * B - 6.0 * C) * x * x * x +
+                              (-18.0 + 12.0 * B + 6.0 * C) * x * x + (6.0 - 2.0 * B));
+    if (x < 2.0)
+        return (1.0 / 6.0) * ((-B - 6.0 * C) * x * x * x + (6.0 * B + 30.0 * C) * x * x +
+                              (-12.0 * B - 48.0 * C) * x + (8.0 * B + 24.0 * C));
+    return 0.0;
+}
+
+// Symmetric index reflection into [0, L-1] (safe_index).
+int safe_index(int idx, int L) {
+    if (idx < 0) return -idx;
+    if (idx >= L) return 2 * (L - 1) - idx;
+    return idx;
+}
+
+// clamp_coordinate + cubic_coordinate_base_fraction, base bounded (see header).
+float cubic_bf(float coord, int L, out int base) {
+    if (coord <= 0.0) coord = 0.0;
+    else if (coord >= float(L - 1)) coord = float(L - 1);
+    if (coord >= float(L - 1)) { base = L - 2; return 1.0; }
+    int b = int(floor(coord));
+    base = clamp(b, 0, L - 2);
+    return coord - float(base);
+}
+
+float log10f(float v) { return log2(v) * 0.30102999566398119521; }
+
+// fast_interp (kernels/interp.cpp interp1d_planar3, channel-specific axis):
+// endpoint clamp + right-biased bracket. NaN x falls through to low = n-2 and
+// propagates NaN via t, matching the engine's NaN handling.
+float interp_dev(float x, int c) {
+    int n = pc.n;
+    float x0 = dev_axis[c], xN = dev_axis[(n - 1) * 3 + c];
+    if (x <= x0) return dev_curve[c];
+    if (x >= xN) return dev_curve[(n - 1) * 3 + c];
+    int low = n - 2;
+    for (int k = 1; k < n; ++k) { if (x < dev_axis[k * 3 + c]) { low = k - 1; break; } }
+    float xl = dev_axis[low * 3 + c], xh = dev_axis[(low + 1) * 3 + c];
+    float dx = xh - xl;
+    float t = (dx != 0.0) ? (x - xl) / dx : 0.0;
+    float y0 = dev_curve[low * 3 + c], y1 = dev_curve[(low + 1) * 3 + c];
+    return y0 + t * (y1 - y0);
+}
+
+// Same kernel over the DIR-coupler tables (model/couplers.cpp fast_interp_channel).
+float interp_dir(float x, int c) {
+    int n = pc.n;
+    float x0 = dir_axis[c], xN = dir_axis[(n - 1) * 3 + c];
+    if (x <= x0) return dir_curve[c];
+    if (x >= xN) return dir_curve[(n - 1) * 3 + c];
+    int low = n - 2;
+    for (int k = 1; k < n; ++k) { if (x < dir_axis[k * 3 + c]) { low = k - 1; break; } }
+    float xl = dir_axis[low * 3 + c], xh = dir_axis[(low + 1) * 3 + c];
+    float dx = xh - xl;
+    float t = (dx != 0.0) ? (x - xl) / dx : 0.0;
+    float y0 = dir_curve[low * 3 + c], y1 = dir_curve[(low + 1) * 3 + c];
+    return y0 + t * (y1 - y0);
+}
+
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    if (p >= pc.npix) return;
+    float r = rgb[p * 3u + 0u], g = rgb[p * 3u + 1u], bch = rgb[p * 3u + 2u];
+
+    // ProPhoto RGB (linear) -> XYZ, CAT02-adapted to D55 (engine kProPhotoToXyzD55,
+    // rounded to fp32 by the compiler — the reference uses the same fp32 constants).
+    float X = 0.7815775876144749 * r + 0.12427353211547089 * g + 0.05084064074531416 * bch;
+    float Y = 0.28106991658512925 * r + 0.7111246050020191 * g + 0.0078043503519031375 * bch;
+    float Z = 0.0008785229438793953 * r + 0.0012166783269637077 * g + 0.9190442562432091 * bch;
+    float bsum = X + Y + Z;
+    float denom = max(bsum, 1e-10);
+    float cx = clamp(X / denom, 0.0, 1.0);
+    float cy = clamp(Y / denom, 0.0, 1.0);
+    // tri2quad
+    float qy = clamp(cy / max(1.0 - cx, 1e-10), 0.0, 1.0);
+    float qx = clamp((1.0 - cx) * (1.0 - cx), 0.0, 1.0);
+    float bmul = isnan(bsum) ? 0.0 : bsum;  // np.nan_to_num(b)
+
+    // Mitchell cubic 4x4 with reflected borders + weight-sum renormalisation.
+    int L = pc.L;
+    float scale = float(L - 1);
+    int xb; float xf = cubic_bf(qx * scale, L, xb);
+    int yb; float yf = cubic_bf(qy * scale, L, yb);
+    float wx[4] = float[4](mitchell(xf + 1.0), mitchell(xf), mitchell(xf - 1.0), mitchell(xf - 2.0));
+    float wy[4] = float[4](mitchell(yf + 1.0), mitchell(yf), mitchell(yf - 1.0), mitchell(yf - 2.0));
+    float acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, wsum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        int xi = safe_index(xb - 1 + i, L);
+        for (int j = 0; j < 4; ++j) {
+            int yj = safe_index(yb - 1 + j, L);
+            float w = wx[i] * wy[j];
+            wsum += w;
+            int cell = (xi * L + yj) * 3;
+            acc0 += w * tc_lut[cell + 0];
+            acc1 += w * tc_lut[cell + 1];
+            acc2 += w * tc_lut[cell + 2];
+        }
+    }
+    if (wsum != 0.0) { acc0 /= wsum; acc1 /= wsum; acc2 /= wsum; }
+
+    // expose tail: raw = rr * b * 2^ev -> log10(max(raw,0)+1e-10).
+    float lr0 = log10f(max(acc0 * bmul * pc.exp_mult, 0.0) + 1e-10);
+    float lr1 = log10f(max(acc1 * bmul * pc.exp_mult, 0.0) + 1e-10);
+    float lr2 = log10f(max(acc2 * bmul * pc.exp_mult, 0.0) + 1e-10);
+
+    // develop: exposure -> density on the normalized curves.
+    float d0 = interp_dev(lr0, 0);
+    float d1 = interp_dev(lr1, 1);
+    float d2 = interp_dev(lr2, 2);
+
+    // DIR couplers (pointwise, negative film): silver = d + shift*d^2,
+    // correction = silver @ M, re-interpolate on the pre-DIR curves.
+    float s0 = d0 + pc.shift * d0 * d0;
+    float s1 = d1 + pc.shift * d1 * d1;
+    float s2 = d2 + pc.shift * d2 * d2;
+    dens[p * 3u + 0u] = interp_dir(lr0 - (s0 * pc.m[0] + s1 * pc.m[3] + s2 * pc.m[6]), 0);
+    dens[p * 3u + 1u] = interp_dir(lr1 - (s0 * pc.m[1] + s1 * pc.m[4] + s2 * pc.m[7]), 1);
+    dens[p * 3u + 2u] = interp_dir(lr2 - (s0 * pc.m[2] + s1 * pc.m[5] + s2 * pc.m[8]), 2);
+}

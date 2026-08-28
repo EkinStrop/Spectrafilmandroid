@@ -1,12 +1,26 @@
-# GPU device probe (#135 E3 → #127)
+# GPU device probe (#135 E3 → #127; M2 filming/printing → #147)
 
-Standalone arm64 probe that measures the fp32 Vulkan scan integral
-(`engine/.../gpu/scan_spectral.comp` via the **unmodified** `spk::gpu::scan_spectral`
-host) against an f64 CPU reference mirroring the shader 1:1, on real device
-hardware. Produces the "does fp32 sit inside the oracle tolerance
-(`max_abs ≤ 1e-4`, `rms ≤ 1e-5`)" number that `docs/research/gpu-bit-exact.md`
-§10.3 calls the decider for #127 / option B. **This wires nothing into the app;
-the GPU-preview-only law is untouched either way.**
+Standalone arm64 probes that measure the fp32 Vulkan per-pixel engine kernels
+against f64 CPU references mirroring each shader 1:1, on real device hardware.
+Produces the "does fp32 sit inside the oracle tolerance (`max_abs ≤ 1e-4`,
+`rms ≤ 1e-5`)" numbers that `docs/research/gpu-bit-exact.md` §10.3 calls the
+decider for #127 / option B. **This wires nothing into the app; the
+GPU-preview-only law is untouched either way.**
+
+Two binaries:
+- `gpu_probe` (M1, #135 E3): the SCAN integral via the **unmodified**
+  `spk::gpu::scan_spectral` host + vendored `engine/.../gpu/scan_spectral.comp`.
+- `gpu_probe_m2` (M2, #147): the FILMING chain (ProPhoto→tc/b → Mitchell-cubic
+  tc_lut interp → log10 → density-curve interp → pointwise DIR couplers) and the
+  PRINTING chain (film CMY → 81-band dichroic-filtered spectral integral →
+  midgray/round-trip → paper density-curve interp), as **probe-local** shaders
+  `filming.comp` / `printing.comp` — engine sources stay byte-untouched. Tables
+  are folded on the host through the engine's own builders
+  (`build_filming_tc_lut`, `normalize_density_curves`,
+  `compute_dir_couplers_matrix`+`np_interp_array`, `digest_printing_params`+
+  `resolve_neutral_cc`+`compute_midgray_exposure_factor`); each run also
+  executes the REAL engine stage on-device and prints mirror-vs-engine (CHAIN),
+  engine-vs-golden (SETUP, must PASS) and GPU-vs-mirror/engine/golden numbers.
 
 Run (phone on USB, NDK r27 installed):
 
@@ -21,11 +35,15 @@ bash tools/gpu_probe/build_push_run.sh
   per-call buffer+pipeline rebuild — offload cost, not pure kernel time).
 - Tier 3 (auto, needs glslc): `precise` (NoContraction) and `mediump`
   (RelaxedPrecision) shader variants, same Tier 1 run.
+- M2 (needs glslc): `film` + `print` subcommands, golden inputs
+  (`tools/parity/goldens/{scan,print}_portra`) + 64³ sweeps + NaN case,
+  determinism ×5, and the same `precise`/`mediump` brackets
+  (`gpu_probe_m2_precise` / `_mediump`).
 
-Tables are extracted through the engine's own loaders/constants and folded per
-the `gpu/vulkan_compute.h` contract (base density + illuminant + normalization
-into `icmf`; NaN bands zeroed — the engine's w=NaN→0 semantics). Results land in
-`tools/gpu_probe/captures/` (untracked); the committed writeup is
-`docs/research/gpu-device-probe.md`.
+Scan tables are extracted through the engine's own loaders/constants and folded
+per the `gpu/vulkan_compute.h` contract (base density + illuminant +
+normalization into `icmf`; NaN bands zeroed — the engine's w=NaN→0 semantics).
+Results land in `tools/gpu_probe/captures/` (untracked); the committed writeup
+is `docs/research/gpu-device-probe.md`.
 
 Film modeling powered by spektrafilm (GPLv3).

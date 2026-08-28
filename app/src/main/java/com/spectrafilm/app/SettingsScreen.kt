@@ -73,6 +73,7 @@ fun SettingsScreen(
     var keepGps by remember { mutableStateOf(settings.exportKeepGps) }
     var gpuPreview by remember { mutableStateOf(settings.gpuPreview) }
     var gpuEngine by remember { mutableStateOf(settings.gpuEngine) }
+    var gpuExport by remember { mutableStateOf(settings.gpuExportEngine) }
 
     Column(
         Modifier
@@ -211,6 +212,26 @@ fun SettingsScreen(
                 Switch(
                     checked = gpuEngine,
                     onCheckedChange = { gpuEngine = it; settings.gpuEngine = it },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("GPU export (Vulkan, experimental)", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Also run the scan stage on the GPU for full-resolution exports — " +
+                            "\"oracle-verified on your device\": the result is checked against " +
+                            "the CPU engine on this device and falls back to CPU automatically " +
+                            "if it ever drifts. Off by default. Independent of the preview toggle.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = gpuExport,
+                    onCheckedChange = { gpuExport = it; settings.gpuExportEngine = it },
                 )
             }
         }

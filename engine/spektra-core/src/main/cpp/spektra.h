@@ -275,7 +275,15 @@ typedef struct {
      *     hard-zero it defensively). spk_simulate honours it because the preview
      *     entry funnels through it — direct C callers must keep it 0. */
     int32_t gpu_preview;               /* bool (wired: preview-only GPU offload toggle) */
-    int32_t allow_gpu_scan;            /* INTERNAL: preview-entry latch, keep 0 */
+    /* EXPERIMENTAL GPU export (GPU M4 seed, #149 option B). Default 0. When set,
+     * spk_simulate (export) routes the scan stage through the GPU under the SAME
+     * one-time on-device self-check as the preview path — "oracle-verified on
+     * your device": the CPU engine stays the ground truth and the automatic
+     * per-frame fallback. Full-res exports are dispatched in slices (the host
+     * handles > 4.19M px). spk_simulate_tap / spk_bake_cube_lut still force the
+     * CPU path. Off by default, so a plain export is byte-identical to today. */
+    int32_t gpu_export;                /* bool (wired: experimental GPU export) */
+    int32_t allow_gpu_scan;            /* INTERNAL: preview/export entry latch, keep 0 */
 
     /* --- gamut compression (opt-in; both default to the byte-identical sentinel) ---
      * Ordinals mirror model/gamut_compression.h's enum classes EXACTLY:

@@ -214,12 +214,20 @@ data class SettingsParams(
     val neutralPrintFiltersFromDatabase: Boolean = true,
     /**
      * GPU preview fast-path (GPU M1, #146). When true, interactive preview
-     * renders (`simulate_preview` only — export always stays on the exact CPU
-     * engine) run the scan stage's spectral integral on the GPU via Vulkan
-     * compute, after a one-time on-device self-check against the CPU engine;
-     * any failure falls back to the CPU per frame. Default false.
+     * renders (`simulate_preview` only) run the scan stage's spectral integral
+     * on the GPU via Vulkan compute, after a one-time on-device self-check
+     * against the CPU engine; any failure falls back to the CPU per frame.
+     * Default false.
      */
     val gpuPreview: Boolean = false,
+    /**
+     * EXPERIMENTAL GPU export (#154, #149 option B). When true, `simulate`
+     * (export) also routes the scan stage through the GPU under the same
+     * on-device self-check + CPU fallback ("oracle-verified on your device").
+     * Full-res exports are dispatched in slices. Independent of [gpuPreview];
+     * default false, so a plain export is byte-identical to the CPU engine.
+     */
+    val gpuExport: Boolean = false,
 )
 
 /** Max control points per tone-curve channel; mirrors SPK_TONE_MAX_PTS in spektra.h. */

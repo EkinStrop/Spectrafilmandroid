@@ -424,29 +424,30 @@ static bool dispatch_scan(Ctx& c, Ctx::Kernel& s, const uint32_t* spv, size_t sp
                           const float* dye, const float* icmf, const float* xyz2rgb) {
     if (!c.ok || !cmy || !rgb || npix == 0 || !dye || !icmf || !xyz2rgb) return false;
     const int NB = 81;
-    const VkDeviceSize imgBytes = static_cast<VkDeviceSize>(npix) * 3u * sizeof(float);
     const VkDeviceSize tblBytes = static_cast<VkDeviceSize>(NB) * 3u * sizeof(float);
+    // SLICING (GPU export, #154): a single dispatch is capped at the
+    // spec-guaranteed maxComputeWorkGroupCount floor (65535 groups × 64 =
+    // 4,193,280 px). Full-res exports (a 12.5 MP frame) exceed that, so the
+    // image is processed in slices of at most MAX_SLICE pixels. The persistent
+    // in/out buffers are sized to the SLICE, not the whole image, bounding GPU
+    // memory. A preview (npix < MAX_SLICE) is exactly one slice — identical to
+    // the pre-slicing single dispatch, so the PR #145 numbers still hold.
+    const uint32_t MAX_SLICE = 65535u * 64u;  // 4,193,280
+    const uint32_t sliceCap = npix < MAX_SLICE ? npix : MAX_SLICE;
+    const VkDeviceSize sliceBytes = static_cast<VkDeviceSize>(sliceCap) * 3u * sizeof(float);
     bool ok = false;
 
     do {
-        // Dispatch geometry up front, refusing anything past the
-        // spec-guaranteed maxComputeWorkGroupCount floor (65535 in x):
-        // dispatching more groups is invalid usage that could return true over
-        // garbage. 65535 * 64 = ~4.19M px — beyond every in-app preview, so
-        // past it the CPU path simply takes over.
-        const uint32_t groups = (npix + 63u) / 64u;
-        if (groups > 65535u) break;
-
         if (!s.pipelineReady && !build_scan_pipeline(c, s, spv, spvBytes)) break;
 
-        // Grow-only image buffers; fixed-size tables. Any (re)creation requires a
-        // descriptor rewrite; buffers only change while the queue is idle (the
-        // fence below is always waited before this function returns), so
-        // rewriting descriptors here is race-free under the mutex.
-        const bool hadIn = s.in.cap >= imgBytes && s.in.buf;
-        const bool hadOut = s.out.cap >= imgBytes && s.out.buf;
-        if (!c.ensureBuf(s.in, imgBytes)) break;
-        if (!c.ensureBuf(s.out, imgBytes)) break;
+        // Grow-only slice buffers; fixed-size tables. Any (re)creation requires a
+        // descriptor rewrite; buffers only change while the queue is idle (each
+        // slice's fence is waited before the next), so rewriting descriptors
+        // here is race-free under the mutex.
+        const bool hadIn = s.in.cap >= sliceBytes && s.in.buf;
+        const bool hadOut = s.out.cap >= sliceBytes && s.out.buf;
+        if (!c.ensureBuf(s.in, sliceBytes)) break;
+        if (!c.ensureBuf(s.out, sliceBytes)) break;
         if (!c.ensureBuf(s.dyeB, tblBytes)) break;
         if (!c.ensureBuf(s.cmfB, tblBytes)) break;
         if (!hadIn || !hadOut) {
@@ -466,54 +467,57 @@ static bool dispatch_scan(Ctx& c, Ctx::Kernel& s, const uint32_t* spv, size_t sp
             vkUpdateDescriptorSets(c.device, 4, wds, 0, nullptr);
         }
 
-        // Upload. The input copy is the NaN guard: non-finite densities map to
-        // 1e4f (zero transmittance -> black) so the shader never sees a NaN/Inf —
-        // clamp(NaN) is implementation-defined in GLSL and must not decide pixel
-        // values. Finite inputs are copied verbatim (bit-exact), so the PR #145
-        // probe numbers are unaffected. Tables are tiny (~1 KB); re-uploaded
-        // every call so callers never need an invalidation API.
-        {
-            float* dst = static_cast<float*>(s.in.mapped);
-            const size_t ncomp = static_cast<size_t>(npix) * 3u;
-            for (size_t i = 0; i < ncomp; ++i) {
-                const float v = cmy[i];
-                dst[i] = std::isfinite(v) ? v : 1e4f;
-            }
-            std::memcpy(s.dyeB.mapped, dye, tblBytes);
-            std::memcpy(s.cmfB.mapped, icmf, tblBytes);
-        }
+        // Tables are tiny (~1 KB) and constant across slices; upload once.
+        std::memcpy(s.dyeB.mapped, dye, tblBytes);
+        std::memcpy(s.cmfB.mapped, icmf, tblBytes);
 
-        // Record + submit. The command buffer is reused; the fence wait below
-        // (before return, success or not) guarantees it is never reset while
-        // pending.
-        if (vkResetCommandBuffer(s.cmd, 0) != VK_SUCCESS) break;
-        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(s.cmd, &bi) != VK_SUCCESS) break;
-        vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipe);
-        vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pl, 0, 1, &s.dset, 0, nullptr);
         ScanPush push{};
-        push.npix = npix;
         // Pack the row-major 3x3 XYZ->RGB into the shader's 3x4 layout (m[0..2],[4..6],[8..10]).
         push.m[0] = xyz2rgb[0]; push.m[1] = xyz2rgb[1]; push.m[2]  = xyz2rgb[2]; push.m[3]  = 0.0f;
         push.m[4] = xyz2rgb[3]; push.m[5] = xyz2rgb[4]; push.m[6]  = xyz2rgb[5]; push.m[7]  = 0.0f;
         push.m[8] = xyz2rgb[6]; push.m[9] = xyz2rgb[7]; push.m[10] = xyz2rgb[8]; push.m[11] = 0.0f;
-        vkCmdPushConstants(s.cmd, s.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ScanPush), &push);
-        vkCmdDispatch(s.cmd, groups, 1, 1);
-        if (vkEndCommandBuffer(s.cmd) != VK_SUCCESS) break;
 
-        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &s.cmd;
-        if (vkQueueSubmit(c.queue, 1, &si, s.fence) != VK_SUCCESS) break;
-        if (vkWaitForFences(c.device, 1, &s.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) break;
-        // A failed reset would leave the fence signaled and a later wait
-        // vacuous — treat it as a real failure (teardown + CPU fallback).
-        if (vkResetFences(c.device, 1, &s.fence) != VK_SUCCESS) break;
+        bool slice_ok = true;
+        for (uint32_t base = 0; base < npix && slice_ok; base += MAX_SLICE) {
+            const uint32_t n = (npix - base) < MAX_SLICE ? (npix - base) : MAX_SLICE;
+            const size_t ncomp = static_cast<size_t>(n) * 3u;
 
-        // Read back (persistently mapped, HOST_COHERENT).
-        std::memcpy(rgb, s.out.mapped, imgBytes);
-        ok = true;
+            // Upload this slice. The input copy is the NaN guard: non-finite
+            // densities map to 1e4f (zero transmittance -> black) so the shader
+            // never sees a NaN/Inf (clamp(NaN) is implementation-defined in
+            // GLSL). Finite inputs are copied verbatim (bit-exact).
+            float* dst = static_cast<float*>(s.in.mapped);
+            const float* src = cmy + static_cast<size_t>(base) * 3u;
+            for (size_t i = 0; i < ncomp; ++i) {
+                const float v = src[i];
+                dst[i] = std::isfinite(v) ? v : 1e4f;
+            }
+
+            // Record + submit. The command buffer is reused; each slice's fence
+            // is waited before the buffer is reset again.
+            if (vkResetCommandBuffer(s.cmd, 0) != VK_SUCCESS) { slice_ok = false; break; }
+            VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            if (vkBeginCommandBuffer(s.cmd, &bi) != VK_SUCCESS) { slice_ok = false; break; }
+            vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipe);
+            vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pl, 0, 1, &s.dset, 0, nullptr);
+            push.npix = n;
+            vkCmdPushConstants(s.cmd, s.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ScanPush), &push);
+            vkCmdDispatch(s.cmd, (n + 63u) / 64u, 1, 1);
+            if (vkEndCommandBuffer(s.cmd) != VK_SUCCESS) { slice_ok = false; break; }
+
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &s.cmd;
+            if (vkQueueSubmit(c.queue, 1, &si, s.fence) != VK_SUCCESS) { slice_ok = false; break; }
+            if (vkWaitForFences(c.device, 1, &s.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) { slice_ok = false; break; }
+            if (vkResetFences(c.device, 1, &s.fence) != VK_SUCCESS) { slice_ok = false; break; }
+
+            // Read this slice back (persistently mapped, HOST_COHERENT).
+            std::memcpy(rgb + static_cast<size_t>(base) * 3u, s.out.mapped,
+                        ncomp * sizeof(float));
+        }
+        ok = slice_ok;
     } while (false);
 
     // Failure recovery: tear the persistent state down so the next call rebuilds

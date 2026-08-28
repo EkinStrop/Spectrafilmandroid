@@ -1972,6 +1972,18 @@ spk_status spk_simulate(spk_engine* eng, const spk_image* in, const spk_params* 
     // spk_simulate_tap. `in` is read for width/height just below, so guard it
     // (and its data) here rather than relying on the run_* callees.
     if (!eng || !in || !p || !out || !in->data) return SPK_ERR_BAD_ARGS;
+    // EXPERIMENTAL GPU export latch (#149 option B, #154). gpu_export routes the
+    // scan stage through the GPU on export, gated by scan()'s self-check + CPU
+    // fallback. Only SETS the internal latch (never clears), so a preview
+    // funneling through here keeps its own allow_gpu_scan; a plain export
+    // (gpu_export == 0) is byte-identical to the CPU path. tap/bake hard-zero
+    // the latch, so this is the ONLY export path that can reach the GPU.
+    spk_params gpu_export_params;
+    if (p->gpu_export != 0 && p->allow_gpu_scan == 0) {
+        gpu_export_params = *p;
+        gpu_export_params.allow_gpu_scan = 1;
+        p = &gpu_export_params;
+    }
     std::vector<float> rgb;
     spk_status st;
     int ow = in->width, oh = in->height;
@@ -2015,6 +2027,10 @@ spk_status spk_simulate_preview(spk_engine* eng, const spk_image* in,
     // (law revision #149: preview-only until option-B ships). When scan() engages the GPU it skips the scanner LUT forced on
     // above entirely (the fp32 direct integral is tighter than the LUT).
     if (pp.gpu_preview != 0) pp.allow_gpu_scan = 1;
+    // The preview funnels through spk_simulate, whose gpu_export latch must NOT
+    // fire here — preview GPU use is governed solely by gpu_preview above. Clear
+    // gpu_export on the preview copy so the two toggles stay independent.
+    pp.gpu_export = 0;
     p = &pp;
     int max_size = p->preview_max_size > 0 ? p->preview_max_size : 640;
     int longest = in->width > in->height ? in->width : in->height;

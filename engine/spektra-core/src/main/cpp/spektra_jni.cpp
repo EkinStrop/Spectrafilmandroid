@@ -498,6 +498,9 @@ bool marshal_params(JNIEnv* env, jobject params, spk_params* out, ParamStorage* 
         // GPU preview fast-path toggle (GPU M1, #146; default false). Consulted
         // only by spk_simulate_preview — export renders ignore it by design.
         out->gpu_preview = call_bool(env, settings, "getGpuPreview") ? 1 : 0;
+        // Experimental GPU export toggle (#154; default false). Consulted only by
+        // spk_simulate (export); preview clears it, tap/bake hard-zero the latch.
+        out->gpu_export = call_bool(env, settings, "getGpuExport") ? 1 : 0;
         out->lut_resolution = call_int(env, settings, "getLutResolution");
         out->preview_max_size = call_int(env, settings, "getPreviewMaxSize");
         out->neutral_print_filters_from_database =
